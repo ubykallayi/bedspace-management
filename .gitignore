@@ -1,3 +1,7 @@
 node_modules
 dist
+<<<<<<< HEAD
 .env
+=======
+.env
+>>>>>>> f26f613 (cleanup for deployment)
