@@ -6,6 +6,7 @@ import { Card } from '../../components/ui/Card';
 import { Input } from '../../components/ui/Input';
 import { useAuth } from '../../contexts/AuthContext';
 import {
+  calculateProratedRent,
   downloadCsv,
   formatCurrency,
   getBookingLifecycleStatus,
@@ -16,6 +17,7 @@ import {
   isMissingColumnError,
   writeActivityLog,
 } from '../../lib/admin';
+import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { supabase } from '../../lib/supabase';
 
 type BedOption = {
@@ -39,6 +41,7 @@ type TenantRecord = {
   phone: string;
   bed_id: string;
   rent_amount: number | string;
+  prorated_rent?: number | string | null;
   start_date: string;
   end_date: string | null;
   is_active?: boolean;
@@ -82,8 +85,11 @@ const INITIAL_FORM_STATE: TenantFormState = {
   payment_status: 'paid',
 };
 
-const BASE_TENANT_SELECT = 'id, user_id, name, email, phone, bed_id, rent_amount, start_date, end_date';
+const BASE_TENANT_SELECT = 'id, user_id, name, email, phone, bed_id, rent_amount, prorated_rent, start_date, end_date';
+const LEGACY_TENANT_SELECT = 'id, user_id, name, email, phone, bed_id, rent_amount, start_date, end_date';
 const ENHANCED_TENANT_SELECT = `${BASE_TENANT_SELECT}, is_active, updated_at, updated_by`;
+const LEGACY_ENHANCED_TENANT_SELECT = `${LEGACY_TENANT_SELECT}, is_active, updated_at, updated_by`;
+const TENANTS_CACHE_KEY = 'tenants-page';
 
 export const Tenants = () => {
   const { user } = useAuth();
@@ -96,6 +102,7 @@ export const Tenants = () => {
   const [formError, setFormError] = useState('');
   const [editingTenantId, setEditingTenantId] = useState<string | null>(null);
   const [tenantSchemaSupportsAdminStatus, setTenantSchemaSupportsAdminStatus] = useState(false);
+  const [tenantSchemaSupportsProratedRent, setTenantSchemaSupportsProratedRent] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [bookingStatusFilter, setBookingStatusFilter] = useState('all');
   const [activationFilter, setActivationFilter] = useState('all');
@@ -118,37 +125,55 @@ export const Tenants = () => {
   ), []);
 
   const fetchData = useCallback(async () => {
-    setLoading(true);
+    const cached = getCachedAdminData<{
+      tenants: TenantRecord[];
+      beds: BedOption[];
+      rooms: RoomRecord[];
+      tenantSchemaSupportsAdminStatus: boolean;
+      tenantSchemaSupportsProratedRent: boolean;
+    }>(TENANTS_CACHE_KEY);
+
+    if (cached) {
+      setTenantSchemaSupportsAdminStatus(cached.tenantSchemaSupportsAdminStatus);
+      setTenantSchemaSupportsProratedRent(cached.tenantSchemaSupportsProratedRent);
+      setBeds(cached.beds);
+      setRooms(cached.rooms);
+      setTenants(cached.tenants);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setFetchError('');
 
     let tenantRows: RawTenantRecord[] = [];
     let schemaSupportsAdminStatus = true;
+    let schemaSupportsProratedRent = true;
 
-    const enhancedTenantQuery = await supabase
-      .from('tenants')
-      .select(ENHANCED_TENANT_SELECT)
-      .order('start_date', { ascending: false });
+    const tenantQueries = [
+      { select: ENHANCED_TENANT_SELECT, supportsAdminStatus: true, supportsProratedRent: true },
+      { select: LEGACY_ENHANCED_TENANT_SELECT, supportsAdminStatus: true, supportsProratedRent: false },
+      { select: BASE_TENANT_SELECT, supportsAdminStatus: false, supportsProratedRent: true },
+      { select: LEGACY_TENANT_SELECT, supportsAdminStatus: false, supportsProratedRent: false },
+    ] as const;
 
-    if (enhancedTenantQuery.error) {
-      if (isMissingColumnError(enhancedTenantQuery.error)) {
-        schemaSupportsAdminStatus = false;
-        const fallbackTenantQuery = await supabase
-          .from('tenants')
-          .select(BASE_TENANT_SELECT)
-          .order('start_date', { ascending: false });
+    for (const tenantQuery of tenantQueries) {
+      const tenantResult = await supabase
+        .from('tenants')
+        .select(tenantQuery.select)
+        .order('start_date', { ascending: false });
 
-        if (fallbackTenantQuery.error) {
-          console.error('Tenant fetch error:', fallbackTenantQuery.error);
-          setFetchError(fallbackTenantQuery.error.message || 'Unable to load tenant records.');
-        } else {
-          tenantRows = (fallbackTenantQuery.data ?? []) as RawTenantRecord[];
-        }
-      } else {
-        console.error('Tenant fetch error:', enhancedTenantQuery.error);
-        setFetchError(enhancedTenantQuery.error.message || 'Unable to load tenant records.');
+      if (!tenantResult.error) {
+        tenantRows = (tenantResult.data ?? []) as unknown as RawTenantRecord[];
+        schemaSupportsAdminStatus = tenantQuery.supportsAdminStatus;
+        schemaSupportsProratedRent = tenantQuery.supportsProratedRent;
+        break;
       }
-    } else {
-      tenantRows = (enhancedTenantQuery.data ?? []) as RawTenantRecord[];
+
+      if (!isMissingColumnError(tenantResult.error)) {
+        console.error('Tenant fetch error:', tenantResult.error);
+        setFetchError(tenantResult.error.message || 'Unable to load tenant records.');
+        break;
+      }
     }
 
     const [
@@ -178,9 +203,18 @@ export const Tenants = () => {
     const safeRooms = (roomsData ?? []) as RoomRecord[];
 
     setTenantSchemaSupportsAdminStatus(schemaSupportsAdminStatus);
+    setTenantSchemaSupportsProratedRent(schemaSupportsProratedRent);
     setBeds(safeBeds);
     setRooms(safeRooms);
-    setTenants(attachRoomAndBed(tenantRows, safeBeds, safeRooms));
+    const enrichedTenants = attachRoomAndBed(tenantRows, safeBeds, safeRooms);
+    setTenants(enrichedTenants);
+    setCachedAdminData(TENANTS_CACHE_KEY, {
+      tenants: enrichedTenants,
+      beds: safeBeds,
+      rooms: safeRooms,
+      tenantSchemaSupportsAdminStatus: schemaSupportsAdminStatus,
+      tenantSchemaSupportsProratedRent: schemaSupportsProratedRent,
+    });
     setLoading(false);
   }, [attachRoomAndBed]);
 
@@ -211,6 +245,12 @@ export const Tenants = () => {
       (!tenant.end_date || tenant.end_date >= today) &&
       tenant.is_active !== false
     ));
+  };
+
+  const getComputedProratedRent = (rentAmountValue: string, startDateValue: string) => {
+    const parsedRentAmount = Number(rentAmountValue);
+    if (Number.isNaN(parsedRentAmount) || parsedRentAmount <= 0 || !startDateValue) return 0;
+    return calculateProratedRent(parsedRentAmount, startDateValue);
   };
 
   const syncBedStatuses = async (bedIds: string[]) => {
@@ -334,6 +374,7 @@ export const Tenants = () => {
         ? Number(formData.rent_amount)
         : bookingPreparation.selectedBed.rent ?? 0;
       const shouldCreateInitialPayment = !editingTenantId && formData.create_initial_payment;
+      const proratedRent = calculateProratedRent(finalRent, formData.start_date);
 
       if (shouldCreateInitialPayment) {
         const parsedPaymentAmount = Number(formData.payment_amount);
@@ -350,9 +391,14 @@ export const Tenants = () => {
         phone: formData.phone.trim(),
         bed_id: formData.bed_id,
         rent_amount: finalRent,
+        prorated_rent: proratedRent,
         start_date: formData.start_date,
         end_date: bookingPreparation.finalEndDate,
       };
+
+      if (!tenantSchemaSupportsProratedRent) {
+        delete tenantPayload.prorated_rent;
+      }
 
       if (tenantSchemaSupportsAdminStatus) {
         tenantPayload.is_active = formData.is_active === 'active';
@@ -423,6 +469,7 @@ export const Tenants = () => {
         });
       }
 
+      invalidateAdminDataCache();
       await syncBedStatuses([formData.bed_id, previousBedId ?? '']);
       await writeActivityLog({
         action: editingTenantId ? 'tenant.updated' : 'tenant.created',
@@ -472,6 +519,7 @@ export const Tenants = () => {
       const { error } = await supabase.from('tenants').delete().eq('id', id);
       if (error) throw error;
 
+      invalidateAdminDataCache();
       await syncBedStatuses([bedId]);
       await writeActivityLog({
         action: 'tenant.deleted',
@@ -506,6 +554,7 @@ export const Tenants = () => {
 
       if (error) throw error;
 
+      invalidateAdminDataCache();
       await writeActivityLog({
         action: nextIsActive ? 'tenant.activated' : 'tenant.deactivated',
         entityType: 'tenant',
@@ -730,7 +779,9 @@ export const Tenants = () => {
                     bed_id: e.target.value,
                     rent_amount: selectedBed?.rent != null ? String(selectedBed.rent) : '',
                     payment_amount: formData.create_initial_payment
-                      ? selectedBed?.rent != null ? String(selectedBed.rent) : formData.payment_amount
+                      ? selectedBed?.rent != null && formData.start_date
+                        ? String(calculateProratedRent(Number(selectedBed.rent), formData.start_date))
+                        : selectedBed?.rent != null ? String(selectedBed.rent) : formData.payment_amount
                       : formData.payment_amount,
                   });
                 }}
@@ -759,7 +810,9 @@ export const Tenants = () => {
               onChange={(e) => setFormData({
                 ...formData,
                 rent_amount: e.target.value,
-                payment_amount: formData.create_initial_payment ? e.target.value : formData.payment_amount,
+                payment_amount: formData.create_initial_payment
+                  ? String(getComputedProratedRent(e.target.value, formData.start_date) || Number(e.target.value || 0))
+                  : formData.payment_amount,
               })}
             />
             <Input
@@ -772,6 +825,9 @@ export const Tenants = () => {
                 start_date: e.target.value,
                 payment_billing_month: e.target.value ? getMonthStartKey(e.target.value) : formData.payment_billing_month,
                 payment_date: !editingTenantId && formData.create_initial_payment ? e.target.value : formData.payment_date,
+                payment_amount: !editingTenantId && formData.create_initial_payment
+                  ? String(getComputedProratedRent(formData.rent_amount, e.target.value) || Number(formData.rent_amount || 0))
+                  : formData.payment_amount,
               })}
             />
             <Input type="date" label="End Date (Optional)" value={formData.end_date} onChange={(e) => setFormData({ ...formData, end_date: e.target.value })} />
@@ -806,7 +862,7 @@ export const Tenants = () => {
                         ...formData,
                         create_initial_payment: e.target.checked,
                         payment_amount: e.target.checked
-                          ? (formData.rent_amount || formData.payment_amount)
+                          ? String(getComputedProratedRent(formData.rent_amount, formData.start_date) || Number(formData.rent_amount || 0))
                           : '',
                         payment_billing_month: e.target.checked
                           ? (formData.start_date ? getMonthStartKey(formData.start_date) : getMonthStartKey(new Date()))
@@ -872,7 +928,7 @@ export const Tenants = () => {
             )}
 
             <p style={{ gridColumn: '1 / -1', color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>
-              You can assign any email now. When that tenant signs up with the same email later, the portal can be linked to this booking. Bed rent auto-fills on selection, and you can still change it before saving.
+              You can assign any email now. When that tenant signs up with the same email later, the portal can be linked to this booking. Bed rent auto-fills on selection, and the first month is saved as prorated rent based on the start date.
             </p>
 
             <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', marginTop: '1rem', flexWrap: 'wrap' }}>

@@ -1,6 +1,6 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
-import { LayoutDashboard, Users, DoorOpen, LogOut, Receipt, Settings as SettingsIcon, X } from 'lucide-react';
+import { LayoutDashboard, Users, DoorOpen, LogOut, Receipt, Settings as SettingsIcon, Wallet, X } from 'lucide-react';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -25,6 +25,7 @@ export const Sidebar = ({ isOpen = false, onClose }: SidebarProps) => {
     { to: '/admin/rooms', icon: DoorOpen, label: 'Rooms & Beds' },
     { to: '/admin/tenants', icon: Users, label: 'Tenants' },
     { to: '/admin/payments', icon: Receipt, label: 'Payments' },
+    { to: '/admin/expenses', icon: Wallet, label: 'Expenses' },
     { to: '/admin/settings', icon: SettingsIcon, label: 'Settings' },
   ];
 

@@ -6,10 +6,14 @@ import { Card } from '../../components/ui/Card';
 import {
   downloadCsv,
   formatCurrency,
+  getRentDueForBillingMonth,
   getMonthlyPaymentStatus,
   getPaymentStatusBadgeClass,
   getPaymentStatusLabel,
+  isMissingColumnError,
+  isMissingTableError,
 } from '../../lib/admin';
+import { getCachedAdminData, setCachedAdminData } from '../../lib/adminDataCache';
 import { supabase } from '../../lib/supabase';
 
 type RoomRecord = {
@@ -37,6 +41,7 @@ type TenantSummary = {
   email?: string;
   bed_id: string;
   rent_amount: number | string;
+  prorated_rent?: number | string | null;
   start_date: string;
   end_date: string | null;
   room?: RoomRecord | null;
@@ -50,6 +55,7 @@ type OccupancyRow = {
   currentTenant: string;
   advanceBooking: string;
 };
+const DASHBOARD_CACHE_KEY = 'admin-dashboard';
 
 export const Dashboard = () => {
   const [stats, setStats] = useState({
@@ -57,7 +63,9 @@ export const Dashboard = () => {
     totalBeds: 0,
     occupiedBeds: 0,
     vacantBeds: 0,
-    monthlyCollected: 0,
+    monthlyRevenue: 0,
+    monthlyExpenses: 0,
+    monthlyNetProfit: 0,
     monthlyRemaining: 0,
     monthlyExpected: 0,
     unpaidCount: 0,
@@ -83,7 +91,20 @@ export const Dashboard = () => {
   }, []);
 
   const fetchStats = async () => {
-    setLoading(true);
+    const cached = getCachedAdminData<{
+      stats: typeof stats;
+      unpaidTenants: typeof unpaidTenants;
+      occupancyRows: OccupancyRow[];
+    }>(DASHBOARD_CACHE_KEY);
+
+    if (cached) {
+      setStats(cached.stats);
+      setUnpaidTenants(cached.unpaidTenants);
+      setOccupancyRows(cached.occupancyRows);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setFetchError('');
 
     try {
@@ -96,25 +117,46 @@ export const Dashboard = () => {
         { count: roomsCount, error: roomsCountError },
         { data: beds, error: bedsError },
         { data: payments, error: paymentsError },
-        { data: tenants, error: tenantsError },
+        { data: expenses, error: expensesError },
         { data: roomRows, error: roomRowsError },
       ] = await Promise.all([
         supabase.from('rooms').select('*', { count: 'exact', head: true }),
         supabase.from('beds').select('id, status, bed_number, room_id'),
         supabase.from('payments').select('tenant_id, amount, status, billing_month'),
-        supabase.from('tenants').select('id, name, email, bed_id, rent_amount, start_date, end_date'),
+        supabase.from('expenses').select('amount, expense_date'),
         supabase.from('rooms').select('id, name'),
       ]);
+
+      const enhancedTenantsResult = await supabase
+        .from('tenants')
+        .select('id, name, email, bed_id, rent_amount, prorated_rent, start_date, end_date');
 
       if (roomsCountError) throw roomsCountError;
       if (bedsError) throw bedsError;
       if (paymentsError) throw paymentsError;
-      if (tenantsError) throw tenantsError;
+      if (expensesError && !isMissingTableError(expensesError)) throw expensesError;
       if (roomRowsError) throw roomRowsError;
+
+      let tenants: TenantSummary[] | null = null;
+      if (enhancedTenantsResult.error) {
+        if (isMissingColumnError(enhancedTenantsResult.error)) {
+          const fallbackTenantsResult = await supabase
+            .from('tenants')
+            .select('id, name, email, bed_id, rent_amount, start_date, end_date');
+
+          if (fallbackTenantsResult.error) throw fallbackTenantsResult.error;
+          tenants = (fallbackTenantsResult.data ?? []) as TenantSummary[];
+        } else {
+          throw enhancedTenantsResult.error;
+        }
+      } else {
+        tenants = (enhancedTenantsResult.data ?? []) as TenantSummary[];
+      }
 
       const safeBeds = (beds ?? []) as BedRecord[];
       const safeRooms = (roomRows ?? []) as RoomRecord[];
       const safePayments = (payments ?? []) as PaymentRecord[];
+      const safeExpenses = (expenses ?? []) as Array<{ amount: number | string; expense_date: string }>;
       const safeTenants = ((tenants ?? []) as TenantSummary[]).map((tenant) => {
         const bed = safeBeds.find((item) => item.id === tenant.bed_id) ?? null;
         const room = bed ? safeRooms.find((item) => item.id === bed.room_id) ?? null : null;
@@ -136,7 +178,12 @@ export const Dashboard = () => {
 
       const unpaid = currentMonthTenants.map((tenant) => {
         const paid = paidTotals.get(tenant.id) ?? 0;
-        const due = Number(tenant.rent_amount);
+        const due = getRentDueForBillingMonth({
+          rentAmount: Number(tenant.rent_amount),
+          proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+          startDate: tenant.start_date,
+          billingMonth,
+        });
         const remaining = Math.max(due - paid, 0);
         const status = getMonthlyPaymentStatus(due, paid);
 
@@ -173,8 +220,17 @@ export const Dashboard = () => {
         };
       });
 
-      const collected = paymentsForMonth.reduce((sum, payment) => sum + Number(payment.amount), 0);
-      const expected = currentMonthTenants.reduce((sum, tenant) => sum + Number(tenant.rent_amount), 0);
+      const revenue = paymentsForMonth.reduce((sum, payment) => sum + Number(payment.amount), 0);
+      const monthlyExpenses = safeExpenses
+        .filter((expense) => expense.expense_date >= billingMonth && expense.expense_date <= format(currentMonthEnd, 'yyyy-MM-dd'))
+        .reduce((sum, expense) => sum + Number(expense.amount), 0);
+      const monthlyNetProfit = revenue - monthlyExpenses;
+      const expected = currentMonthTenants.reduce((sum, tenant) => sum + getRentDueForBillingMonth({
+        rentAmount: Number(tenant.rent_amount),
+        proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+        startDate: tenant.start_date,
+        billingMonth,
+      }), 0);
       const remaining = unpaid.reduce((sum, tenant) => sum + tenant.remaining, 0);
 
       setStats({
@@ -182,7 +238,9 @@ export const Dashboard = () => {
         totalBeds,
         occupiedBeds: occupied,
         vacantBeds: totalBeds - occupied,
-        monthlyCollected: collected,
+        monthlyRevenue: revenue,
+        monthlyExpenses,
+        monthlyNetProfit,
         monthlyRemaining: remaining,
         monthlyExpected: expected,
         unpaidCount: unpaid.filter((tenant) => tenant.status === 'unpaid').length,
@@ -190,6 +248,23 @@ export const Dashboard = () => {
       });
       setUnpaidTenants(unpaid);
       setOccupancyRows(occupancy);
+      setCachedAdminData(DASHBOARD_CACHE_KEY, {
+        stats: {
+          rooms: roomsCount || 0,
+          totalBeds,
+          occupiedBeds: occupied,
+          vacantBeds: totalBeds - occupied,
+          monthlyRevenue: revenue,
+          monthlyExpenses,
+          monthlyNetProfit,
+          monthlyRemaining: remaining,
+          monthlyExpected: expected,
+          unpaidCount: unpaid.filter((tenant) => tenant.status === 'unpaid').length,
+          partialCount: unpaid.filter((tenant) => tenant.status === 'partial').length,
+        },
+        unpaidTenants: unpaid,
+        occupancyRows: occupancy,
+      });
     } catch (error) {
       console.error('Error fetching stats:', error);
       setFetchError(error instanceof Error ? error.message : 'Unable to load dashboard data.');
@@ -203,7 +278,9 @@ export const Dashboard = () => {
       `collections-summary-${format(new Date(), 'yyyy-MM')}.csv`,
       ['Section', 'Label', 'Value'],
       [
-        ['Summary', 'Collected This Month', stats.monthlyCollected],
+        ['Summary', 'Revenue This Month', stats.monthlyRevenue],
+        ['Summary', 'Expenses This Month', stats.monthlyExpenses],
+        ['Summary', 'Net Profit This Month', stats.monthlyNetProfit],
         ['Summary', 'Expected This Month', stats.monthlyExpected],
         ['Summary', 'Remaining This Month', stats.monthlyRemaining],
         ['Summary', 'Unpaid Tenants', stats.unpaidCount],
@@ -341,12 +418,22 @@ export const Dashboard = () => {
         <Card style={{ borderLeft: '4px solid #8b5cf6', gridColumn: '1 / -1' }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem', alignItems: 'center' }}>
             <div>
-              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Collected This Month</p>
-              <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: '#8b5cf6' }}>{formatCurrency(stats.monthlyCollected)}</h2>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Revenue This Month</p>
+              <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: '#8b5cf6' }}>{formatCurrency(stats.monthlyRevenue)}</h2>
             </div>
             <div>
               <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Expected This Month</p>
               <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem' }}>{formatCurrency(stats.monthlyExpected)}</h2>
+            </div>
+            <div>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Expenses This Month</p>
+              <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: 'var(--danger)' }}>{formatCurrency(stats.monthlyExpenses)}</h2>
+            </div>
+            <div>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Net Profit This Month</p>
+              <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: stats.monthlyNetProfit >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+                {formatCurrency(stats.monthlyNetProfit)}
+              </h2>
             </div>
             <div>
               <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Remaining This Month</p>

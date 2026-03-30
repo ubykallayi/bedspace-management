@@ -11,6 +11,7 @@ import {
   formatCurrency,
   getMonthInputValue,
   getMonthStartKey,
+  getRentDueForBillingMonth,
   getMonthlyPaymentStatus,
   getPaymentStatusBadgeClass,
   getPaymentStatusLabel,
@@ -22,6 +23,7 @@ import {
   openPaymentReceipt,
   PaymentReceiptData,
 } from '../../lib/receipts';
+import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { supabase } from '../../lib/supabase';
 
 type RoomRecord = {
@@ -42,6 +44,7 @@ type TenantSummary = {
   phone?: string;
   bed_id: string;
   rent_amount: number | string;
+  prorated_rent?: number | string | null;
   start_date: string;
   end_date: string | null;
   is_active?: boolean;
@@ -68,6 +71,11 @@ const getCurrentBillingMonth = () => getMonthStartKey(new Date());
 
 const BASE_PAYMENT_SELECT = 'id, tenant_id, amount, payment_date, billing_month, status';
 const ENHANCED_PAYMENT_SELECT = `${BASE_PAYMENT_SELECT}, updated_at, updated_by`;
+const ENHANCED_TENANT_SELECT = 'id, name, email, phone, bed_id, rent_amount, prorated_rent, start_date, end_date, is_active';
+const BASE_TENANT_SELECT = 'id, name, email, phone, bed_id, rent_amount, prorated_rent, start_date, end_date';
+const LEGACY_ENHANCED_TENANT_SELECT = 'id, name, email, phone, bed_id, rent_amount, start_date, end_date, is_active';
+const LEGACY_TENANT_SELECT = 'id, name, email, phone, bed_id, rent_amount, start_date, end_date';
+const PAYMENTS_CACHE_KEY = 'payments-page';
 
 export const Payments = () => {
   const { settings } = useAppSettings();
@@ -96,7 +104,7 @@ export const Payments = () => {
   });
 
   const attachTenantDisplayData = (
-    tenantRows: Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; start_date: string; end_date: string | null; is_active?: boolean }>,
+    tenantRows: Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>,
     bedRows: BedRecord[],
     roomRows: RoomRecord[],
   ): TenantSummary[] => tenantRows.map((tenant) => {
@@ -111,7 +119,20 @@ export const Payments = () => {
   });
 
   const fetchData = useCallback(async () => {
-    setLoading(true);
+    const cached = getCachedAdminData<{
+      payments: PaymentRecord[];
+      tenants: TenantSummary[];
+      paymentSchemaSupportsAudit: boolean;
+    }>(PAYMENTS_CACHE_KEY);
+
+    if (cached) {
+      setPayments(cached.payments);
+      setTenants(cached.tenants);
+      setPaymentSchemaSupportsAudit(cached.paymentSchemaSupportsAudit);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     setFetchError('');
 
     let paymentRows: PaymentRecord[] = [];
@@ -145,30 +166,32 @@ export const Payments = () => {
     }
 
     let tenantRows:
-      | Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; start_date: string; end_date: string | null; is_active?: boolean }>
+      | Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>
       | null = null;
     let tenantErrorMessage = '';
 
-    const enhancedTenantsResult = await supabase
-      .from('tenants')
-      .select('id, name, email, phone, bed_id, rent_amount, start_date, end_date, is_active')
-      .order('start_date', { ascending: false });
+    const tenantQueries = [
+      ENHANCED_TENANT_SELECT,
+      LEGACY_ENHANCED_TENANT_SELECT,
+      BASE_TENANT_SELECT,
+      LEGACY_TENANT_SELECT,
+    ] as const;
 
-    if (enhancedTenantsResult.error && isMissingColumnError(enhancedTenantsResult.error)) {
-      const fallbackTenantsResult = await supabase
+    for (const tenantSelect of tenantQueries) {
+      const tenantResult = await supabase
         .from('tenants')
-        .select('id, name, email, phone, bed_id, rent_amount, start_date, end_date')
+        .select(tenantSelect)
         .order('start_date', { ascending: false });
 
-      if (fallbackTenantsResult.error) {
-        tenantErrorMessage = fallbackTenantsResult.error.message || 'Unable to load tenants.';
-      } else {
-        tenantRows = (fallbackTenantsResult.data ?? []) as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; start_date: string; end_date: string | null; is_active?: boolean }>;
+      if (!tenantResult.error) {
+        tenantRows = (tenantResult.data ?? []) as unknown as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>;
+        break;
       }
-    } else if (enhancedTenantsResult.error) {
-      tenantErrorMessage = enhancedTenantsResult.error.message || 'Unable to load tenants.';
-    } else {
-      tenantRows = (enhancedTenantsResult.data ?? []) as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; start_date: string; end_date: string | null; is_active?: boolean }>;
+
+      if (!isMissingColumnError(tenantResult.error)) {
+        tenantErrorMessage = tenantResult.error.message || 'Unable to load tenants.';
+        break;
+      }
     }
 
     const [
@@ -193,7 +216,7 @@ export const Payments = () => {
     }
 
     const enhancedTenants = attachTenantDisplayData(
-      (tenantRows ?? []) as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; start_date: string; end_date: string | null; is_active?: boolean }>,
+      (tenantRows ?? []) as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>,
       (bedRows ?? []) as BedRecord[],
       (roomRows ?? []) as RoomRecord[],
     );
@@ -207,7 +230,14 @@ export const Payments = () => {
 
     const enhancedPaymentsWithStatus = paymentRows.map((payment) => {
       const tenant = enhancedTenants.find((item) => item.id === payment.tenant_id) ?? null;
-      const cycleDue = Number(tenant?.rent_amount ?? 0);
+      const cycleDue = tenant
+        ? getRentDueForBillingMonth({
+          rentAmount: Number(tenant.rent_amount ?? 0),
+          proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+          startDate: tenant.start_date,
+          billingMonth: payment.billing_month,
+        })
+        : 0;
       const cyclePaid = paidTotals.get(`${payment.tenant_id}:${payment.billing_month}`) ?? 0;
       const cycleStatus = getMonthlyPaymentStatus(cycleDue, cyclePaid);
 
@@ -223,6 +253,11 @@ export const Payments = () => {
     setPaymentSchemaSupportsAudit(paymentAuditEnabled);
     setTenants(enhancedTenants);
     setPayments(enhancedPaymentsWithStatus);
+    setCachedAdminData(PAYMENTS_CACHE_KEY, {
+      payments: enhancedPaymentsWithStatus,
+      tenants: enhancedTenants,
+      paymentSchemaSupportsAudit: paymentAuditEnabled,
+    });
     setLoading(false);
   }, []);
 
@@ -241,7 +276,14 @@ export const Payments = () => {
     const updatedCyclePaid = payment.status === 'paid'
       ? Math.max(cyclePaid, payment.amount)
       : cyclePaid;
-    const dueAmount = Number(tenant?.rent_amount ?? 0);
+    const dueAmount = tenant
+      ? getRentDueForBillingMonth({
+        rentAmount: Number(tenant.rent_amount ?? 0),
+        proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+        startDate: tenant.start_date,
+        billingMonth: payment.billing_month,
+      })
+      : 0;
     const remainingAmount = Math.max(dueAmount - updatedCyclePaid, 0);
 
     return {
@@ -322,6 +364,7 @@ export const Payments = () => {
       actorId: user?.id,
     });
 
+    invalidateAdminDataCache();
     await fetchData();
     setShowForm(false);
     setEditingPaymentId(null);
@@ -339,7 +382,14 @@ export const Payments = () => {
     setFormData({
       ...formData,
       tenant_id: id,
-      amount: tenant ? String(tenant.rent_amount) : '',
+      amount: tenant
+        ? String(getRentDueForBillingMonth({
+          rentAmount: Number(tenant.rent_amount),
+          proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+          startDate: tenant.start_date,
+          billingMonth: formData.billing_month,
+        }))
+        : '',
     });
     setFormError('');
   };
@@ -365,6 +415,7 @@ export const Payments = () => {
       description: 'Marked payment record as paid.',
       actorId: user?.id,
     });
+    invalidateAdminDataCache();
     await fetchData();
   };
 
@@ -403,6 +454,7 @@ export const Payments = () => {
       actorId: user?.id,
     });
 
+    invalidateAdminDataCache();
     if (editingPaymentId === paymentId) {
       setEditingPaymentId(null);
       setShowForm(false);
@@ -442,7 +494,12 @@ export const Payments = () => {
 
   const monthlyTenantStatuses = useMemo(() => {
     return activeTenantsForMonth.map((tenant) => {
-      const due = Number(tenant.rent_amount);
+      const due = getRentDueForBillingMonth({
+        rentAmount: Number(tenant.rent_amount),
+        proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+        startDate: tenant.start_date,
+        billingMonth: selectedBillingMonth,
+      });
       const paid = paymentTotalsForMonth.get(tenant.id) ?? 0;
       const remaining = Math.max(due - paid, 0);
       const cycleStatus = getMonthlyPaymentStatus(due, paid);
@@ -455,7 +512,7 @@ export const Payments = () => {
         cycleStatus,
       };
     });
-  }, [activeTenantsForMonth, paymentTotalsForMonth]);
+  }, [activeTenantsForMonth, paymentTotalsForMonth, selectedBillingMonth]);
 
   const filteredPayments = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
@@ -719,7 +776,22 @@ export const Payments = () => {
               label="Rent Month"
               required
               value={formData.billing_month.slice(0, 7)}
-              onChange={(e) => setFormData({ ...formData, billing_month: `${e.target.value}-01` })}
+              onChange={(e) => {
+                const nextBillingMonth = `${e.target.value}-01`;
+                const tenant = tenants.find((item) => item.id === formData.tenant_id);
+                setFormData({
+                  ...formData,
+                  billing_month: nextBillingMonth,
+                  amount: tenant
+                    ? String(getRentDueForBillingMonth({
+                      rentAmount: Number(tenant.rent_amount),
+                      proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+                      startDate: tenant.start_date,
+                      billingMonth: nextBillingMonth,
+                    }))
+                    : formData.amount,
+                });
+              }}
             />
 
             <Input
@@ -747,7 +819,12 @@ export const Payments = () => {
 
           {selectedTenant && (
             <div style={{ marginTop: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-              Selected booking: {selectedTenant.room?.name ?? 'Unknown room'} | Bed {selectedTenant.bed?.bed_number ?? 'Unknown'} | Standard rent {formatCurrency(Number(selectedTenant.rent_amount))}
+              Selected booking: {selectedTenant.room?.name ?? 'Unknown room'} | Bed {selectedTenant.bed?.bed_number ?? 'Unknown'} | Due for {format(new Date(formData.billing_month), 'MMM yyyy')} {formatCurrency(getRentDueForBillingMonth({
+                rentAmount: Number(selectedTenant.rent_amount),
+                proratedRent: selectedTenant.prorated_rent != null ? Number(selectedTenant.prorated_rent) : null,
+                startDate: selectedTenant.start_date,
+                billingMonth: formData.billing_month,
+              }))}
             </div>
           )}
 

@@ -46,6 +46,7 @@ export const Settings = () => {
       support_email: formData.support_email.trim(),
       support_phone: formData.support_phone.trim(),
       timezone: formData.timezone.trim(),
+      expense_categories: formData.expense_categories.trim(),
       updated_at: new Date().toISOString(),
       updated_by: user?.id ?? null,
     };
@@ -149,6 +150,17 @@ export const Settings = () => {
             placeholder="Asia/Dubai"
             required
           />
+          <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+            <label className="form-label">Expense Categories</label>
+            <textarea
+              className="form-input"
+              rows={6}
+              value={formData.expense_categories}
+              onChange={(e) => updateField('expense_categories', e.target.value)}
+              placeholder={'Maintenance\nUtilities\nSupplies'}
+              style={{ resize: 'vertical', minHeight: '140px' }}
+            />
+          </div>
 
           {saveError && (
             <div style={{ gridColumn: '1 / -1', color: 'var(--danger)', fontSize: '0.875rem', padding: '0.75rem 1rem', background: 'var(--danger-bg)', borderRadius: 'var(--radius-sm)' }}>
@@ -164,6 +176,9 @@ export const Settings = () => {
 
           <p style={{ gridColumn: '1 / -1', color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>
             Currency Display controls how amounts appear in the UI. For example, using `AED` will show values like `AED 1200.00`.
+          </p>
+          <p style={{ gridColumn: '1 / -1', color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>
+            Expense Categories should be entered one per line. These values will appear in the expense form dropdown.
           </p>
 
           <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end' }}>

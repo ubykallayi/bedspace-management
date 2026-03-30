@@ -9,9 +9,11 @@ import {
   getBookingLifecycleStatus,
   getBookingStatusBadgeClass,
   getBookingStatusLabel,
+  getRentDueForBillingMonth,
   getMonthlyPaymentStatus,
   getPaymentStatusBadgeClass,
   getPaymentStatusLabel,
+  isMissingColumnError,
 } from '../../lib/admin';
 import { openPaymentReceipt } from '../../lib/receipts';
 import { supabase } from '../../lib/supabase';
@@ -35,6 +37,7 @@ type TenantBooking = {
   user_id: string | null;
   bed_id: string;
   rent_amount: number | string;
+  prorated_rent?: number | string | null;
   start_date: string;
   end_date: string | null;
   bed?: BedRecord | null;
@@ -160,35 +163,84 @@ export const TenantDashboard = () => {
 
       const byUserResult = await supabase
         .from('tenants')
-        .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date')
+        .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date')
         .eq('user_id', user.id)
         .order('start_date', { ascending: false });
 
       if (byUserResult.error) {
-        console.error('Tenant dashboard fetch error:', byUserResult.error);
-        setFetchError(byUserResult.error.message || 'Unable to load your bookings right now.');
-        setLoading(false);
-        return;
-      }
-
-      if (byUserResult.data && byUserResult.data.length > 0) {
-        bookingRows = byUserResult.data as TenantBooking[];
-      } else if (user.email) {
-        const normalizedEmail = user.email.toLowerCase();
-        const emailLookup = await supabase
-          .from('tenants')
-          .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date')
-          .eq('email', normalizedEmail)
-          .order('start_date', { ascending: false });
-
-        if (emailLookup.error) {
-          console.error('Tenant email lookup error:', emailLookup.error);
-          setFetchError(emailLookup.error.message || 'Unable to load your bookings right now.');
+        if (!isMissingColumnError(byUserResult.error)) {
+          console.error('Tenant dashboard fetch error:', byUserResult.error);
+          setFetchError(byUserResult.error.message || 'Unable to load your bookings right now.');
           setLoading(false);
           return;
         }
 
-        if (emailLookup.data && emailLookup.data.length > 0) {
+        const legacyByUserResult = await supabase
+          .from('tenants')
+          .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date')
+          .eq('user_id', user.id)
+          .order('start_date', { ascending: false });
+
+        if (legacyByUserResult.error) {
+          console.error('Tenant dashboard fetch error:', legacyByUserResult.error);
+          setFetchError(legacyByUserResult.error.message || 'Unable to load your bookings right now.');
+          setLoading(false);
+          return;
+        }
+
+        bookingRows = (legacyByUserResult.data ?? []) as TenantBooking[];
+      } else if (byUserResult.data && byUserResult.data.length > 0) {
+        bookingRows = byUserResult.data as TenantBooking[];
+      }
+
+      if (bookingRows.length === 0 && user.email) {
+        const normalizedEmail = user.email.toLowerCase();
+        const emailLookup = await supabase
+          .from('tenants')
+          .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date')
+          .eq('email', normalizedEmail)
+          .order('start_date', { ascending: false });
+
+        if (emailLookup.error) {
+          if (!isMissingColumnError(emailLookup.error)) {
+            console.error('Tenant email lookup error:', emailLookup.error);
+            setFetchError(emailLookup.error.message || 'Unable to load your bookings right now.');
+            setLoading(false);
+            return;
+          }
+
+          const legacyEmailLookup = await supabase
+            .from('tenants')
+            .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date')
+            .eq('email', normalizedEmail)
+            .order('start_date', { ascending: false });
+
+          if (legacyEmailLookup.error) {
+            console.error('Tenant email lookup error:', legacyEmailLookup.error);
+            setFetchError(legacyEmailLookup.error.message || 'Unable to load your bookings right now.');
+            setLoading(false);
+            return;
+          }
+
+          if (legacyEmailLookup.data && legacyEmailLookup.data.length > 0) {
+            const unlinkedIds = legacyEmailLookup.data
+              .filter((booking) => !booking.user_id)
+              .map((booking) => booking.id);
+
+            if (unlinkedIds.length > 0) {
+              await supabase
+                .from('tenants')
+                .update({ user_id: user.id })
+                .in('id', unlinkedIds)
+                .eq('email', normalizedEmail);
+            }
+
+            bookingRows = legacyEmailLookup.data.map((booking) => ({
+              ...booking,
+              user_id: booking.user_id ?? user.id,
+            })) as TenantBooking[];
+          }
+        } else if (emailLookup.data && emailLookup.data.length > 0) {
           const unlinkedIds = emailLookup.data
             .filter((booking) => !booking.user_id)
             .map((booking) => booking.id);
@@ -300,7 +352,12 @@ export const TenantDashboard = () => {
     booking.start_date <= format(currentMonthEnd, 'yyyy-MM-dd') &&
     (!booking.end_date || booking.end_date >= format(currentMonthStart, 'yyyy-MM-dd'))
   ));
-  const currentMonthDue = monthlyBookings.reduce((sum, booking) => sum + Number(booking.rent_amount), 0);
+  const currentMonthDue = monthlyBookings.reduce((sum, booking) => sum + getRentDueForBillingMonth({
+    rentAmount: Number(booking.rent_amount),
+    proratedRent: booking.prorated_rent != null ? Number(booking.prorated_rent) : null,
+    startDate: booking.start_date,
+    billingMonth,
+  }), 0);
   const currentMonthPaid = payments
     .filter((payment) => payment.status === 'paid' && payment.billing_month === billingMonth)
     .reduce((sum, payment) => sum + Number(payment.amount), 0);
@@ -312,7 +369,14 @@ export const TenantDashboard = () => {
   const pastBookings = bookings.filter((booking) => booking.end_date !== null && booking.end_date < todayKey);
   const openReceiptForPayment = (payment: PaymentRecord) => {
     const relatedBooking = bookings.find((booking) => booking.id === payment.tenant_id);
-    const dueAmount = Number(relatedBooking?.rent_amount ?? 0);
+    const dueAmount = relatedBooking
+      ? getRentDueForBillingMonth({
+        rentAmount: Number(relatedBooking.rent_amount ?? 0),
+        proratedRent: relatedBooking.prorated_rent != null ? Number(relatedBooking.prorated_rent) : null,
+        startDate: relatedBooking.start_date,
+        billingMonth: payment.billing_month,
+      })
+      : 0;
     const paidAmount = payments
       .filter((item) => item.status === 'paid' && item.billing_month === payment.billing_month && item.tenant_id === payment.tenant_id)
       .reduce((sum, item) => sum + Number(item.amount), 0);
@@ -376,6 +440,18 @@ export const TenantDashboard = () => {
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {payments.map((payment) => {
               const relatedBooking = bookings.find((booking) => booking.id === payment.tenant_id);
+              const cyclePaid = payments
+                .filter((item) => item.status === 'paid' && item.billing_month === payment.billing_month && item.tenant_id === payment.tenant_id)
+                .reduce((sum, item) => sum + Number(item.amount), 0);
+              const cycleDue = relatedBooking
+                ? getRentDueForBillingMonth({
+                  rentAmount: Number(relatedBooking.rent_amount ?? 0),
+                  proratedRent: relatedBooking.prorated_rent != null ? Number(relatedBooking.prorated_rent) : null,
+                  startDate: relatedBooking.start_date,
+                  billingMonth: payment.billing_month,
+                })
+                : 0;
+              const cycleStatus = getMonthlyPaymentStatus(cycleDue, cyclePaid);
 
               return (
                 <div key={payment.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', borderBottom: '1px solid var(--border-light)' }}>
@@ -389,8 +465,8 @@ export const TenantDashboard = () => {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                     <span style={{ fontWeight: 600 }}>{formatCurrency(Number(payment.amount))}</span>
-                    <span className={`badge ${getPaymentStatusBadgeClass(getMonthlyPaymentStatus(Number(relatedBooking?.rent_amount ?? 0), payments.filter((item) => item.status === 'paid' && item.billing_month === payment.billing_month && item.tenant_id === payment.tenant_id).reduce((sum, item) => sum + Number(item.amount), 0)))}`}>
-                      {getPaymentStatusLabel(getMonthlyPaymentStatus(Number(relatedBooking?.rent_amount ?? 0), payments.filter((item) => item.status === 'paid' && item.billing_month === payment.billing_month && item.tenant_id === payment.tenant_id).reduce((sum, item) => sum + Number(item.amount), 0)))}
+                    <span className={`badge ${getPaymentStatusBadgeClass(cycleStatus)}`}>
+                      {getPaymentStatusLabel(cycleStatus)}
                     </span>
                     <button
                       type="button"

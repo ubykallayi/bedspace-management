@@ -7,6 +7,7 @@ import { Topbar } from './components/layout/Topbar';
 import { Login } from './pages/Login';
 
 import { Dashboard as AdminDashboard } from './pages/admin/Dashboard';
+import { Expenses as AdminExpenses } from './pages/admin/Expenses';
 import { Rooms as AdminRooms } from './pages/admin/Rooms';
 import { Tenants as AdminTenants } from './pages/admin/Tenants';
 import { Payments as AdminPayments } from './pages/admin/Payments';
@@ -77,6 +78,7 @@ function AppRoutes() {
               <Route path="/rooms" element={<AdminRooms />} />
               <Route path="/tenants" element={<AdminTenants />} />
               <Route path="/payments" element={<AdminPayments />} />
+              <Route path="/expenses" element={<AdminExpenses />} />
               <Route path="/settings" element={<AdminSettings />} />
             </Routes>
           </AppLayout>

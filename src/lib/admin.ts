@@ -31,8 +31,58 @@ export const getMonthInputValue = (value: Date | string) => getMonthStartKey(val
 
 export const formatCurrency = (value: number) => `${formattingSettings.currencySymbol} ${value.toFixed(2)}`;
 
+const roundCurrencyAmount = (value: number) => Math.round(value * 100) / 100;
+
+export const calculateProratedRent = (rentAmount: number, startDate: Date | string) => {
+  if (!Number.isFinite(rentAmount) || rentAmount <= 0) return 0;
+
+  const normalizedStartDate = typeof startDate === 'string' ? new Date(startDate) : startDate;
+  if (Number.isNaN(normalizedStartDate.getTime())) return roundCurrencyAmount(rentAmount);
+
+  const daysInMonth = new Date(
+    normalizedStartDate.getFullYear(),
+    normalizedStartDate.getMonth() + 1,
+    0,
+  ).getDate();
+  const occupiedDays = daysInMonth - normalizedStartDate.getDate() + 1;
+
+  return roundCurrencyAmount((rentAmount / daysInMonth) * occupiedDays);
+};
+
+export const getRentDueForBillingMonth = ({
+  rentAmount,
+  proratedRent,
+  startDate,
+  billingMonth,
+}: {
+  rentAmount: number;
+  proratedRent?: number | null;
+  startDate: string;
+  billingMonth: Date | string;
+}) => {
+  const normalizedRent = Number(rentAmount);
+  if (!Number.isFinite(normalizedRent) || normalizedRent <= 0) return 0;
+
+  const startMonthKey = getMonthStartKey(startDate);
+  const billingMonthKey = getMonthStartKey(billingMonth);
+
+  if (startMonthKey !== billingMonthKey) {
+    return roundCurrencyAmount(normalizedRent);
+  }
+
+  if (proratedRent != null && Number.isFinite(Number(proratedRent))) {
+    return roundCurrencyAmount(Number(proratedRent));
+  }
+
+  return calculateProratedRent(normalizedRent, startDate);
+};
+
 export const isMissingColumnError = (error: unknown) => {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === '42703';
+};
+
+export const isMissingTableError = (error: unknown) => {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '42P01';
 };
 
 export const getBookingLifecycleStatus = (

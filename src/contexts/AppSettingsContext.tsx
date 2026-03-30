@@ -10,6 +10,7 @@ export type AppSettings = {
   support_email: string;
   support_phone: string;
   timezone: string;
+  expense_categories: string;
 };
 
 type AppSettingsContextValue = {
@@ -27,6 +28,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   support_email: '',
   support_phone: '',
   timezone: 'Asia/Dubai',
+  expense_categories: 'Maintenance\nUtilities\nSupplies\nRepairs\nCleaning\nOther',
 };
 
 const AppSettingsContext = createContext<AppSettingsContextValue>({
@@ -44,6 +46,7 @@ const normalizeSettings = (value?: Partial<AppSettings> | null): AppSettings => 
   support_email: value?.support_email?.trim() || DEFAULT_SETTINGS.support_email,
   support_phone: value?.support_phone?.trim() || DEFAULT_SETTINGS.support_phone,
   timezone: value?.timezone?.trim() || DEFAULT_SETTINGS.timezone,
+  expense_categories: value?.expense_categories?.trim() || DEFAULT_SETTINGS.expense_categories,
 });
 
 export const AppSettingsProvider = ({ children }: { children: React.ReactNode }) => {
@@ -57,7 +60,7 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
 
     const { data, error: settingsError } = await supabase
       .from('app_settings')
-      .select('site_name, currency_code, currency_symbol, company_name, support_email, support_phone, timezone')
+      .select('site_name, currency_code, currency_symbol, company_name, support_email, support_phone, timezone, expense_categories')
       .eq('id', 1)
       .maybeSingle();
 

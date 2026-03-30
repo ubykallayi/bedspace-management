@@ -57,6 +57,52 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
   }, []);
 
+  const getTenantActivationState = async (user: User) => {
+    const tenantRows: Array<{ id: string; is_active?: boolean | null }> = [];
+    const tenantQueries = [
+      supabase
+        .from('tenants')
+        .select('id, is_active')
+        .eq('user_id', user.id),
+      user.email
+        ? supabase
+          .from('tenants')
+          .select('id, is_active')
+          .eq('email', user.email.toLowerCase())
+        : null,
+    ].filter(Boolean);
+
+    for (const tenantQuery of tenantQueries) {
+      //const { data, error } = await tenantQuery;
+      const response = await tenantQuery;
+
+if (!response) return;
+
+const { data, error } = response;
+
+      if (error) {
+        if (error.code === '42703' || error.code === '42P01') {
+          return { blocked: false };
+        }
+        throw error;
+      }
+
+      tenantRows.push(...((data ?? []) as Array<{ id: string; is_active?: boolean | null }>));
+    }
+
+    const uniqueTenantRows = tenantRows.filter((tenant, index, rows) => (
+      rows.findIndex((item) => item.id === tenant.id) === index
+    ));
+
+    if (uniqueTenantRows.length === 0) {
+      return { blocked: false };
+    }
+
+    return {
+      blocked: !uniqueTenantRows.some((tenant) => tenant.is_active !== false),
+    };
+  };
+
   const fetchUserRole = async (user: User) => {
     try {
       const { data, error } = await supabase
@@ -66,6 +112,20 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         .single();
         
       if (error) throw error;
+
+      if (data?.role === 'tenant') {
+        const tenantActivation = await getTenantActivationState(user) ?? { blocked: false };
+        if (tenantActivation.blocked) {
+          await supabase.auth.signOut();
+          setState({
+            user: null,
+            role: null,
+            isLoading: false,
+            error: 'Account inactive',
+          });
+          return;
+        }
+      }
       
       setState({
         user,
