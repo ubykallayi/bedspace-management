@@ -11,6 +11,7 @@ export type AppSettings = {
   support_phone: string;
   timezone: string;
   expense_categories: string;
+  google_drive_client_id: string;
 };
 
 type AppSettingsContextValue = {
@@ -29,7 +30,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   support_phone: '',
   timezone: 'Asia/Dubai',
   expense_categories: 'Maintenance\nUtilities\nSupplies\nRepairs\nCleaning\nOther',
+  google_drive_client_id: '',
 };
+
+let currentSettingsSnapshot: AppSettings = DEFAULT_SETTINGS;
+
+export const getAppSettingsSnapshot = () => currentSettingsSnapshot;
 
 const AppSettingsContext = createContext<AppSettingsContextValue>({
   settings: DEFAULT_SETTINGS,
@@ -47,6 +53,7 @@ const normalizeSettings = (value?: Partial<AppSettings> | null): AppSettings => 
   support_phone: value?.support_phone?.trim() || DEFAULT_SETTINGS.support_phone,
   timezone: value?.timezone?.trim() || DEFAULT_SETTINGS.timezone,
   expense_categories: value?.expense_categories?.trim() || DEFAULT_SETTINGS.expense_categories,
+  google_drive_client_id: value?.google_drive_client_id?.trim() || DEFAULT_SETTINGS.google_drive_client_id,
 });
 
 export const AppSettingsProvider = ({ children }: { children: React.ReactNode }) => {
@@ -60,7 +67,7 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
 
     const { data, error: settingsError } = await supabase
       .from('app_settings')
-      .select('site_name, currency_code, currency_symbol, company_name, support_email, support_phone, timezone, expense_categories')
+      .select('site_name, currency_code, currency_symbol, company_name, support_email, support_phone, timezone, expense_categories, google_drive_client_id')
       .eq('id', 1)
       .maybeSingle();
 
@@ -68,6 +75,7 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
       if (settingsError.code === '42P01' || settingsError.code === '42703') {
         const fallbackSettings = normalizeSettings(null);
         setSettings(fallbackSettings);
+        currentSettingsSnapshot = fallbackSettings;
         setFormattingSettings({
           currencyCode: fallbackSettings.currency_code,
           currencySymbol: fallbackSettings.currency_symbol,
@@ -80,6 +88,7 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
       console.error('App settings fetch error:', settingsError);
       const fallbackSettings = normalizeSettings(null);
       setSettings(fallbackSettings);
+      currentSettingsSnapshot = fallbackSettings;
       setFormattingSettings({
         currencyCode: fallbackSettings.currency_code,
         currencySymbol: fallbackSettings.currency_symbol,
@@ -91,6 +100,7 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
 
     const normalized = normalizeSettings(data);
     setSettings(normalized);
+    currentSettingsSnapshot = normalized;
     setFormattingSettings({
       currencyCode: normalized.currency_code,
       currencySymbol: normalized.currency_symbol,

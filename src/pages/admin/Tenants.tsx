@@ -3,7 +3,9 @@ import { differenceInDays, format, subDays } from 'date-fns';
 import { AlertCircle, Download, Pencil, Plus, Power, Search, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Input } from '../../components/ui/Input';
+import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   calculateProratedRent,
@@ -18,6 +20,7 @@ import {
   writeActivityLog,
 } from '../../lib/admin';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
+import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
 import { supabase } from '../../lib/supabase';
 
 type BedOption = {
@@ -26,6 +29,7 @@ type BedOption = {
   status: 'vacant' | 'occupied';
   rent: number | null;
   room_id: string;
+  property_id?: string;
 };
 
 type RoomRecord = {
@@ -47,6 +51,7 @@ type TenantRecord = {
   is_active?: boolean;
   updated_at?: string | null;
   updated_by?: string | null;
+  property_id?: string;
   bed?: BedOption | null;
   room?: RoomRecord | null;
 };
@@ -93,6 +98,7 @@ const TENANTS_CACHE_KEY = 'tenants-page';
 
 export const Tenants = () => {
   const { user } = useAuth();
+  const { selectedProperty, selectedPropertyId, isLoading: propertiesLoading, error: propertiesError } = useAdminProperty();
   const [tenants, setTenants] = useState<TenantRecord[]>([]);
   const [beds, setBeds] = useState<BedOption[]>([]);
   const [rooms, setRooms] = useState<RoomRecord[]>([]);
@@ -108,6 +114,14 @@ export const Tenants = () => {
   const [activationFilter, setActivationFilter] = useState('all');
   const [roomFilter, setRoomFilter] = useState('all');
   const [showFilters, setShowFilters] = useState(false);
+  const [alerts, setAlerts] = useState<AdminAlertsData>({ unpaidTenants: [], expiringTenants: [] });
+  const [pendingAction, setPendingAction] = useState<null | {
+    title: string;
+    message: string;
+    confirmLabel: string;
+    tone: 'danger' | 'warning';
+    action: () => Promise<void>;
+  }>(null);
   const [formData, setFormData] = useState<TenantFormState>(INITIAL_FORM_STATE);
   const formCardRef = useRef<HTMLDivElement | null>(null);
 
@@ -125,13 +139,25 @@ export const Tenants = () => {
   ), []);
 
   const fetchData = useCallback(async () => {
+    if (!selectedPropertyId) {
+      setTenantSchemaSupportsAdminStatus(false);
+      setTenantSchemaSupportsProratedRent(true);
+      setBeds([]);
+      setRooms([]);
+      setTenants([]);
+      setFetchError('');
+      setLoading(false);
+      return;
+    }
+
+    const cacheKey = `${TENANTS_CACHE_KEY}:${selectedPropertyId}`;
     const cached = getCachedAdminData<{
       tenants: TenantRecord[];
       beds: BedOption[];
       rooms: RoomRecord[];
       tenantSchemaSupportsAdminStatus: boolean;
       tenantSchemaSupportsProratedRent: boolean;
-    }>(TENANTS_CACHE_KEY);
+    }>(cacheKey);
 
     if (cached) {
       setTenantSchemaSupportsAdminStatus(cached.tenantSchemaSupportsAdminStatus);
@@ -160,6 +186,7 @@ export const Tenants = () => {
       const tenantResult = await supabase
         .from('tenants')
         .select(tenantQuery.select)
+        .eq('property_id', selectedPropertyId)
         .order('start_date', { ascending: false });
 
       if (!tenantResult.error) {
@@ -182,11 +209,13 @@ export const Tenants = () => {
     ] = await Promise.all([
       supabase
         .from('beds')
-        .select('id, bed_number, status, rent, room_id')
+        .select('id, bed_number, status, rent, room_id, property_id')
+        .eq('property_id', selectedPropertyId)
         .order('bed_number'),
       supabase
         .from('rooms')
         .select('id, name')
+        .eq('property_id', selectedPropertyId)
         .order('name'),
     ]);
 
@@ -208,7 +237,7 @@ export const Tenants = () => {
     setRooms(safeRooms);
     const enrichedTenants = attachRoomAndBed(tenantRows, safeBeds, safeRooms);
     setTenants(enrichedTenants);
-    setCachedAdminData(TENANTS_CACHE_KEY, {
+    setCachedAdminData(cacheKey, {
       tenants: enrichedTenants,
       beds: safeBeds,
       rooms: safeRooms,
@@ -216,11 +245,24 @@ export const Tenants = () => {
       tenantSchemaSupportsProratedRent: schemaSupportsProratedRent,
     });
     setLoading(false);
-  }, [attachRoomAndBed]);
+  }, [attachRoomAndBed, selectedPropertyId]);
 
   useEffect(() => {
     void fetchData();
   }, [fetchData]);
+
+  useEffect(() => {
+    const cachedAlerts = getCachedAdminAlerts(selectedPropertyId);
+    if (cachedAlerts) {
+      setAlerts(cachedAlerts);
+    }
+
+    fetchAdminAlerts(selectedPropertyId)
+      .then(setAlerts)
+      .catch((error) => {
+        console.error('Tenant alerts error:', error);
+      });
+  }, [selectedPropertyId, tenants]);
 
   const resetForm = () => {
     setFormData(INITIAL_FORM_STATE);
@@ -262,6 +304,7 @@ export const Tenants = () => {
         .from('tenants')
         .select('id')
         .eq('bed_id', bedId)
+        .eq('property_id', selectedPropertyId)
         .lte('start_date', today)
         .or(`end_date.is.null,end_date.gte.${today}`);
 
@@ -358,6 +401,11 @@ export const Tenants = () => {
     e.preventDefault();
     setFormError('');
 
+    if (!selectedPropertyId) {
+      setFormError('Please select a property before saving a tenant.');
+      return;
+    }
+
     try {
       const bookingPreparation = prepareBooking(formData.bed_id, formData.start_date, formData.end_date, editingTenantId);
       if ('error' in bookingPreparation) {
@@ -390,6 +438,7 @@ export const Tenants = () => {
         email: normalizedEmail,
         phone: formData.phone.trim(),
         bed_id: formData.bed_id,
+        property_id: selectedPropertyId,
         rent_amount: finalRent,
         prorated_rent: proratedRent,
         start_date: formData.start_date,
@@ -512,9 +561,7 @@ export const Tenants = () => {
     });
   };
 
-  const handleDelete = async (id: string, bedId: string, name: string) => {
-    if (!confirm('Remove this tenant?')) return;
-
+  const performDelete = async (id: string, bedId: string, name: string) => {
     try {
       const { error } = await supabase.from('tenants').delete().eq('id', id);
       if (error) throw error;
@@ -535,7 +582,7 @@ export const Tenants = () => {
     }
   };
 
-  const handleToggleActivation = async (tenant: TenantRecord) => {
+  const performToggleActivation = async (tenant: TenantRecord) => {
     if (!tenantSchemaSupportsAdminStatus) {
       setFormError('Manual active/inactive control needs the latest tenant status migration in Supabase.');
       return;
@@ -636,6 +683,30 @@ export const Tenants = () => {
     );
   }
 
+  if (propertiesLoading) {
+    return (
+      <div className="page-container">
+        <Card>
+          <h2 style={{ marginBottom: '0.5rem' }}>Loading properties...</h2>
+          <p style={{ color: 'var(--text-secondary)' }}>We are loading the property list before opening tenant records.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!selectedPropertyId) {
+    return (
+      <div className="page-container">
+        <Card style={{ borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <h2 style={{ marginBottom: '0.75rem' }}>No property selected</h2>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+            {propertiesError || 'Create your first property in Settings to start assigning tenants.'}
+          </p>
+        </Card>
+      </div>
+    );
+  }
+
   if (fetchError) {
     return (
       <div className="page-container">
@@ -658,7 +729,9 @@ export const Tenants = () => {
       <div className="page-header">
         <div>
           <h1 className="page-title">Tenants</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Manage current residents, future bookings, and contract status in one place.</p>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            Manage current residents, future bookings, and contract status for {selectedProperty?.name ?? 'the selected property'}.
+          </p>
         </div>
         <div className="admin-toolbar">
           <Button variant="secondary" onClick={() => setShowFilters((value) => !value)}>
@@ -683,6 +756,16 @@ export const Tenants = () => {
           <h3 style={{ marginBottom: '0.5rem' }}>Tenant status and audit fields need one SQL migration</h3>
           <p style={{ color: 'var(--text-secondary)' }}>
             Search, booking badges, and exports are ready now. Manual active/inactive control and audit stamps will start saving as soon as `tenants.is_active`, `tenants.updated_at`, and `tenants.updated_by` exist in Supabase.
+          </p>
+        </Card>
+      )}
+
+      {(alerts.unpaidTenants.length > 0 || alerts.expiringTenants.length > 0) && (
+        <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <h3 style={{ marginBottom: '0.5rem' }}>Attention Needed</h3>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            {alerts.unpaidTenants.length > 0 ? `${alerts.unpaidTenants.length} tenant(s) have unpaid or partial rent this month. ` : ''}
+            {alerts.expiringTenants.length > 0 ? `${alerts.expiringTenants.length} contract(s) expire within 7 days.` : ''}
           </p>
         </Card>
       )}
@@ -955,20 +1038,42 @@ export const Tenants = () => {
 
         {filteredTenants.map((tenant) => {
           const bookingStatus = tenant.bookingStatus;
+          const isUnpaid = alerts.unpaidTenants.some((item) => item.id === tenant.id);
+          const isExpiringSoon = alerts.expiringTenants.some((item) => item.id === tenant.id);
           const daysLeft = tenant.end_date ? differenceInDays(new Date(tenant.end_date), new Date()) : null;
-          const nearingExpiry = bookingStatus === 'active' && daysLeft !== null && daysLeft <= 15 && daysLeft >= 0;
+          const nearingExpiry = bookingStatus === 'active' && daysLeft !== null && daysLeft <= 7 && daysLeft >= 0;
           const contractPeriodLabel = tenant.end_date
             ? `${format(new Date(tenant.start_date), 'MMM dd')} - ${format(new Date(tenant.end_date), 'MMM dd, yyyy')}`
             : `${format(new Date(tenant.start_date), 'MMM dd')} - Ongoing`;
 
           return (
-            <Card key={tenant.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '1.25rem', gap: '1rem', flexWrap: 'wrap', borderColor: editingTenantId === tenant.id ? 'var(--primary)' : undefined }}>
+            <Card key={tenant.id} style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '1.25rem',
+              gap: '1rem',
+              flexWrap: 'wrap',
+              borderColor: editingTenantId === tenant.id
+                ? 'var(--primary)'
+                : isUnpaid
+                  ? 'rgba(239, 68, 68, 0.4)'
+                  : isExpiringSoon
+                    ? 'rgba(245, 158, 11, 0.45)'
+                    : undefined,
+              background: isUnpaid
+                ? 'rgba(127, 29, 29, 0.12)'
+                : isExpiringSoon
+                  ? 'rgba(120, 53, 15, 0.12)'
+                  : undefined,
+            }}>
               <div>
                 <h3 style={{ fontSize: '1.1rem', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                   {tenant.name}
                   <span className={`badge ${getBookingStatusBadgeClass(bookingStatus)}`}>
                     {getBookingStatusLabel(bookingStatus)}
                   </span>
+                  {isUnpaid && <span className="badge badge-danger">Unpaid Rent</span>}
                   {nearingExpiry && <AlertCircle size={16} color="var(--warning)" />}
                 </h3>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
@@ -1001,12 +1106,32 @@ export const Tenants = () => {
                   </Button>
                   <Button
                     variant="secondary"
-                    onClick={() => void handleToggleActivation(tenant)}
+                    onClick={() => setPendingAction({
+                      title: tenant.is_active === false ? 'Activate Tenant' : 'Deactivate Tenant',
+                      message: tenant.is_active === false
+                        ? `Activate ${tenant.name} so they can access the tenant portal again?`
+                        : `Deactivate ${tenant.name}? They will lose tenant portal access until reactivated.`,
+                      confirmLabel: tenant.is_active === false ? 'Activate' : 'Deactivate',
+                      tone: 'warning',
+                      action: async () => {
+                        await performToggleActivation(tenant);
+                        setPendingAction(null);
+                      },
+                    })}
                     title={tenant.is_active === false ? 'Activate tenant' : 'Deactivate tenant'}
                   >
                     <Power size={16} color={tenant.is_active === false ? 'var(--success)' : 'var(--warning)'} />
                   </Button>
-                  <Button variant="secondary" onClick={() => void handleDelete(tenant.id, tenant.bed_id, tenant.name)}>
+                  <Button variant="secondary" onClick={() => setPendingAction({
+                    title: 'Delete Tenant',
+                    message: `Delete ${tenant.name} and remove this booking record?`,
+                    confirmLabel: 'Delete',
+                    tone: 'danger',
+                    action: async () => {
+                      await performDelete(tenant.id, tenant.bed_id, tenant.name);
+                      setPendingAction(null);
+                    },
+                  })}>
                     <Trash2 size={16} color="var(--danger)" />
                   </Button>
                 </div>
@@ -1015,6 +1140,18 @@ export const Tenants = () => {
           );
         })}
       </div>
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.title ?? ''}
+        message={pendingAction?.message ?? ''}
+        confirmLabel={pendingAction?.confirmLabel}
+        tone={pendingAction?.tone}
+        onCancel={() => setPendingAction(null)}
+        onConfirm={async () => {
+          if (!pendingAction) return;
+          await pendingAction.action();
+        }}
+      />
     </div>
   );
 };

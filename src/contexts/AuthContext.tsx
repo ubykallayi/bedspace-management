@@ -1,10 +1,11 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { User } from '@supabase/supabase-js';
+import { AppRole } from '../lib/rbac';
 import { supabase } from '../lib/supabase';
 
 type AuthState = {
   user: User | null;
-  role: 'admin' | 'tenant' | null;
+  role: AppRole | null;
   isLoading: boolean;
   error: string | null;
 };
@@ -58,16 +59,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, []);
 
   const getTenantActivationState = async (user: User) => {
-    const tenantRows: Array<{ id: string; is_active?: boolean | null }> = [];
+    const tenantRows: Array<{ id: string; is_active?: boolean | null; end_date?: string | null }> = [];
     const tenantQueries = [
       supabase
         .from('tenants')
-        .select('id, is_active')
+        .select('id, is_active, end_date')
         .eq('user_id', user.id),
       user.email
         ? supabase
           .from('tenants')
-          .select('id, is_active')
+          .select('id, is_active, end_date')
           .eq('email', user.email.toLowerCase())
         : null,
     ].filter(Boolean);
@@ -87,7 +88,7 @@ const { data, error } = response;
         throw error;
       }
 
-      tenantRows.push(...((data ?? []) as Array<{ id: string; is_active?: boolean | null }>));
+      tenantRows.push(...((data ?? []) as Array<{ id: string; is_active?: boolean | null; end_date?: string | null }>));
     }
 
     const uniqueTenantRows = tenantRows.filter((tenant, index, rows) => (
@@ -98,20 +99,48 @@ const { data, error } = response;
       return { blocked: false };
     }
 
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
     return {
-      blocked: !uniqueTenantRows.some((tenant) => tenant.is_active !== false),
+      blocked: !uniqueTenantRows.some((tenant) => {
+        const isManuallyActive = tenant.is_active !== false;
+        const isNotExpired = !tenant.end_date || new Date(tenant.end_date) >= today;
+        return isManuallyActive && isNotExpired;
+      }),
     };
   };
 
   const fetchUserRole = async (user: User) => {
     try {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from('users')
-        .select('role')
+        .select('role, is_active')
         .eq('id', user.id)
         .single();
-        
+
+      if (error?.code === '42703') {
+        const fallbackResponse = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', user.id)
+          .single();
+        data = fallbackResponse.data ? { ...fallbackResponse.data, is_active: true } : null;
+        error = fallbackResponse.error;
+      }
+
       if (error) throw error;
+
+      if (data?.is_active === false) {
+        await supabase.auth.signOut();
+        setState({
+          user: null,
+          role: null,
+          isLoading: false,
+          error: 'Account inactive',
+        });
+        return;
+      }
 
       if (data?.role === 'tenant') {
         const tenantActivation = await getTenantActivationState(user) ?? { blocked: false };
@@ -129,7 +158,7 @@ const { data, error } = response;
       
       setState({
         user,
-        role: data?.role as 'admin' | 'tenant',
+        role: data?.role as AppRole,
         isLoading: false,
         error: null,
       });

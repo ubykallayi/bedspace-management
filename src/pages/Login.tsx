@@ -70,7 +70,9 @@ export const Login = () => {
         <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
           <DoorOpen size={48} color="var(--primary)" style={{ margin: '0 auto' }} />
           <h1 style={{ marginTop: '1rem', marginBottom: '0.5rem' }}>{settings.site_name}</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Log in or create an account to continue</p>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            Log in to continue. New tenant accounts can sign up here, while staff access is created by a super admin.
+          </p>
         </div>
 
         <Card>
@@ -111,7 +113,7 @@ export const Login = () => {
                 onClick={() => setIsRegister(!isRegister)}
                 style={{ color: 'var(--primary)', fontWeight: 500 }}
               >
-                {isRegister ? 'Log In' : 'Sign Up'}
+                {isRegister ? 'Log In' : 'Create Tenant Account'}
               </button>
             </div>
           </form>

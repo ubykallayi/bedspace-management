@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
-import { format, lastDayOfMonth, startOfMonth } from 'date-fns';
-import { BedDouble, CheckCircle2, DoorOpen, Download, XCircle } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { addDays, format, lastDayOfMonth, startOfMonth } from 'date-fns';
+import { BedDouble, CheckCircle2, CloudUpload, DoorOpen, Download, XCircle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
+import { useAdminProperty } from '../../contexts/AdminPropertyContext';
+import { useAuth } from '../../contexts/AuthContext';
 import {
   downloadCsv,
   formatCurrency,
@@ -13,7 +15,9 @@ import {
   isMissingColumnError,
   isMissingTableError,
 } from '../../lib/admin';
+import { buildBackupFileName, fetchBackupPayload } from '../../lib/backup';
 import { getCachedAdminData, setCachedAdminData } from '../../lib/adminDataCache';
+import { uploadJsonBackupToGoogleDrive } from '../../lib/googleDrive';
 import { supabase } from '../../lib/supabase';
 
 type RoomRecord = {
@@ -26,6 +30,7 @@ type BedRecord = {
   status: 'vacant' | 'occupied';
   bed_number: string;
   room_id: string;
+  property_id?: string;
 };
 
 type PaymentRecord = {
@@ -44,6 +49,7 @@ type TenantSummary = {
   prorated_rent?: number | string | null;
   start_date: string;
   end_date: string | null;
+  property_id?: string;
   room?: RoomRecord | null;
   bed?: BedRecord | null;
 };
@@ -58,6 +64,8 @@ type OccupancyRow = {
 const DASHBOARD_CACHE_KEY = 'admin-dashboard';
 
 export const Dashboard = () => {
+  const { role } = useAuth();
+  const { selectedProperty, selectedPropertyId, isLoading: propertiesLoading, error: propertiesError } = useAdminProperty();
   const [stats, setStats] = useState({
     rooms: 0,
     totalBeds: 0,
@@ -83,23 +91,59 @@ export const Dashboard = () => {
     status: 'paid' | 'partial' | 'unpaid';
   }>>([]);
   const [occupancyRows, setOccupancyRows] = useState<OccupancyRow[]>([]);
+  const [expiringTenants, setExpiringTenants] = useState<Array<{
+    id: string;
+    name: string;
+    roomName?: string;
+    bedNumber?: string;
+    daysToExpiry: number;
+  }>>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
+  const [backupState, setBackupState] = useState<{
+    isUploading: boolean;
+    message: string;
+    tone: 'success' | 'danger';
+  }>({
+    isUploading: false,
+    message: '',
+    tone: 'success',
+  });
 
-  useEffect(() => {
-    void fetchStats();
-  }, []);
+  const fetchStats = useCallback(async () => {
+    if (!selectedPropertyId) {
+      setStats({
+        rooms: 0,
+        totalBeds: 0,
+        occupiedBeds: 0,
+        vacantBeds: 0,
+        monthlyRevenue: 0,
+        monthlyExpenses: 0,
+        monthlyNetProfit: 0,
+        monthlyRemaining: 0,
+        monthlyExpected: 0,
+        unpaidCount: 0,
+        partialCount: 0,
+      });
+      setUnpaidTenants([]);
+      setExpiringTenants([]);
+      setOccupancyRows([]);
+      setLoading(false);
+      return;
+    }
 
-  const fetchStats = async () => {
+    const cacheKey = `${DASHBOARD_CACHE_KEY}:${selectedPropertyId}`;
     const cached = getCachedAdminData<{
       stats: typeof stats;
       unpaidTenants: typeof unpaidTenants;
+      expiringTenants: typeof expiringTenants;
       occupancyRows: OccupancyRow[];
-    }>(DASHBOARD_CACHE_KEY);
+    }>(cacheKey);
 
     if (cached) {
       setStats(cached.stats);
       setUnpaidTenants(cached.unpaidTenants);
+      setExpiringTenants(cached.expiringTenants);
       setOccupancyRows(cached.occupancyRows);
       setLoading(false);
     } else {
@@ -116,24 +160,22 @@ export const Dashboard = () => {
       const [
         { count: roomsCount, error: roomsCountError },
         { data: beds, error: bedsError },
-        { data: payments, error: paymentsError },
         { data: expenses, error: expensesError },
         { data: roomRows, error: roomRowsError },
       ] = await Promise.all([
-        supabase.from('rooms').select('*', { count: 'exact', head: true }),
-        supabase.from('beds').select('id, status, bed_number, room_id'),
-        supabase.from('payments').select('tenant_id, amount, status, billing_month'),
+        supabase.from('rooms').select('*', { count: 'exact', head: true }).eq('property_id', selectedPropertyId),
+        supabase.from('beds').select('id, status, bed_number, room_id, property_id').eq('property_id', selectedPropertyId),
         supabase.from('expenses').select('amount, expense_date'),
-        supabase.from('rooms').select('id, name'),
+        supabase.from('rooms').select('id, name').eq('property_id', selectedPropertyId),
       ]);
 
       const enhancedTenantsResult = await supabase
         .from('tenants')
-        .select('id, name, email, bed_id, rent_amount, prorated_rent, start_date, end_date');
+        .select('id, name, email, bed_id, rent_amount, prorated_rent, start_date, end_date, property_id')
+        .eq('property_id', selectedPropertyId);
 
       if (roomsCountError) throw roomsCountError;
       if (bedsError) throw bedsError;
-      if (paymentsError) throw paymentsError;
       if (expensesError && !isMissingTableError(expensesError)) throw expensesError;
       if (roomRowsError) throw roomRowsError;
 
@@ -142,7 +184,8 @@ export const Dashboard = () => {
         if (isMissingColumnError(enhancedTenantsResult.error)) {
           const fallbackTenantsResult = await supabase
             .from('tenants')
-            .select('id, name, email, bed_id, rent_amount, start_date, end_date');
+            .select('id, name, email, bed_id, rent_amount, start_date, end_date, property_id')
+            .eq('property_id', selectedPropertyId);
 
           if (fallbackTenantsResult.error) throw fallbackTenantsResult.error;
           tenants = (fallbackTenantsResult.data ?? []) as TenantSummary[];
@@ -155,7 +198,6 @@ export const Dashboard = () => {
 
       const safeBeds = (beds ?? []) as BedRecord[];
       const safeRooms = (roomRows ?? []) as RoomRecord[];
-      const safePayments = (payments ?? []) as PaymentRecord[];
       const safeExpenses = (expenses ?? []) as Array<{ amount: number | string; expense_date: string }>;
       const safeTenants = ((tenants ?? []) as TenantSummary[]).map((tenant) => {
         const bed = safeBeds.find((item) => item.id === tenant.bed_id) ?? null;
@@ -165,6 +207,14 @@ export const Dashboard = () => {
 
       const occupied = safeBeds.filter((bed) => bed.status === 'occupied').length;
       const totalBeds = safeBeds.length;
+      const tenantIds = safeTenants.map((tenant) => tenant.id);
+      const paymentsResult = tenantIds.length > 0
+        ? await supabase.from('payments').select('tenant_id, amount, status, billing_month').in('tenant_id', tenantIds)
+        : { data: [] as PaymentRecord[], error: null };
+
+      if (paymentsResult.error) throw paymentsResult.error;
+
+      const safePayments = (paymentsResult.data ?? []) as PaymentRecord[];
       const currentMonthTenants = safeTenants.filter((tenant) => (
         tenant.start_date <= format(currentMonthEnd, 'yyyy-MM-dd') &&
         (!tenant.end_date || tenant.end_date >= format(currentMonthStart, 'yyyy-MM-dd'))
@@ -221,6 +271,19 @@ export const Dashboard = () => {
       });
 
       const revenue = paymentsForMonth.reduce((sum, payment) => sum + Number(payment.amount), 0);
+      const expiring = safeTenants
+        .filter((tenant) => (
+          tenant.end_date &&
+          tenant.end_date >= todayKey &&
+          tenant.end_date <= format(addDays(new Date(), 7), 'yyyy-MM-dd')
+        ))
+        .map((tenant) => ({
+          id: tenant.id,
+          name: tenant.name,
+          roomName: tenant.room?.name,
+          bedNumber: tenant.bed?.bed_number,
+          daysToExpiry: Math.max(0, Math.ceil((new Date(tenant.end_date as string).getTime() - new Date(todayKey).getTime()) / (1000 * 60 * 60 * 24))),
+        }));
       const monthlyExpenses = safeExpenses
         .filter((expense) => expense.expense_date >= billingMonth && expense.expense_date <= format(currentMonthEnd, 'yyyy-MM-dd'))
         .reduce((sum, expense) => sum + Number(expense.amount), 0);
@@ -247,8 +310,9 @@ export const Dashboard = () => {
         partialCount: unpaid.filter((tenant) => tenant.status === 'partial').length,
       });
       setUnpaidTenants(unpaid);
+      setExpiringTenants(expiring);
       setOccupancyRows(occupancy);
-      setCachedAdminData(DASHBOARD_CACHE_KEY, {
+      setCachedAdminData(cacheKey, {
         stats: {
           rooms: roomsCount || 0,
           totalBeds,
@@ -263,6 +327,7 @@ export const Dashboard = () => {
           partialCount: unpaid.filter((tenant) => tenant.status === 'partial').length,
         },
         unpaidTenants: unpaid,
+        expiringTenants: expiring,
         occupancyRows: occupancy,
       });
     } catch (error) {
@@ -271,7 +336,11 @@ export const Dashboard = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedPropertyId]);
+
+  useEffect(() => {
+    void fetchStats();
+  }, [fetchStats]);
 
   const exportCollectionsCsv = () => {
     downloadCsv(
@@ -320,12 +389,74 @@ export const Dashboard = () => {
     );
   };
 
+  const handleBackupData = async () => {
+    if (!role) return;
+
+    setBackupState({
+      isUploading: true,
+      message: '',
+      tone: 'success',
+    });
+
+    try {
+      const payload = await fetchBackupPayload({
+        role,
+        selectedPropertyId,
+        selectedPropertyName: selectedProperty?.name,
+      });
+      const filename = buildBackupFileName();
+      const uploadResult = await uploadJsonBackupToGoogleDrive({
+        filename,
+        jsonContent: JSON.stringify(payload, null, 2),
+      });
+
+      setBackupState({
+        isUploading: false,
+        message: uploadResult.webViewLink
+          ? `Backup uploaded successfully to Google Drive as ${uploadResult.name}.`
+          : `Backup uploaded successfully to Google Drive as ${uploadResult.name}.`,
+        tone: 'success',
+      });
+    } catch (error) {
+      console.error('Backup upload error:', error);
+      setBackupState({
+        isUploading: false,
+        message: error instanceof Error ? error.message : 'Backup failed. Please try again.',
+        tone: 'danger',
+      });
+    }
+  };
+
   if (loading) {
     return (
       <div className="page-container">
         <Card>
           <h2 style={{ marginBottom: '0.5rem' }}>Loading dashboard...</h2>
           <p style={{ color: 'var(--text-secondary)' }}>We are calculating occupancy and this month&apos;s collections now.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (propertiesLoading) {
+    return (
+      <div className="page-container">
+        <Card>
+          <h2 style={{ marginBottom: '0.5rem' }}>Loading properties...</h2>
+          <p style={{ color: 'var(--text-secondary)' }}>We are loading your property list before preparing the dashboard.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!selectedPropertyId) {
+    return (
+      <div className="page-container">
+        <Card style={{ borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <h2 style={{ marginBottom: '0.75rem' }}>No property selected</h2>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+            {propertiesError || 'Create your first property in Settings to start organizing rooms, beds, and tenants.'}
+          </p>
         </Card>
       </div>
     );
@@ -351,9 +482,14 @@ export const Dashboard = () => {
       <div className="page-header">
         <div>
           <h1 className="page-title">Overview</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Monthly occupancy, collections, and follow-up items for the admin team.</p>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            Monthly occupancy, collections, and follow-up items for {selectedProperty?.name ?? 'the selected property'}.
+          </p>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <Button variant="secondary" onClick={() => void handleBackupData()} isLoading={backupState.isUploading}>
+            <CloudUpload size={16} /> Backup Data
+          </Button>
           <Button variant="secondary" onClick={exportCollectionsCsv}>
             <Download size={16} /> Collections CSV
           </Button>
@@ -365,6 +501,23 @@ export const Dashboard = () => {
           </Button>
         </div>
       </div>
+
+      {backupState.message && (
+        <Card style={{
+          marginBottom: '1.5rem',
+          borderColor: backupState.tone === 'danger' ? 'rgba(239, 68, 68, 0.35)' : 'rgba(34, 197, 94, 0.35)',
+        }}>
+          <h3 style={{ marginBottom: '0.5rem' }}>
+            {backupState.tone === 'danger' ? 'Backup failed' : 'Backup complete'}
+          </h3>
+          <p style={{ color: 'var(--text-secondary)' }}>{backupState.message}</p>
+          {backupState.tone === 'danger' && (
+            <p style={{ color: 'var(--text-tertiary)', marginTop: '0.75rem' }}>
+              Configure the Google Drive Client ID in Settings before using Drive backup.
+            </p>
+          )}
+        </Card>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
         <Card style={{ borderLeft: '4px solid var(--primary)' }}>
@@ -446,6 +599,38 @@ export const Dashboard = () => {
           </div>
         </Card>
       </div>
+
+      {(unpaidTenants.length > 0 || expiringTenants.length > 0) && (
+        <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <h2 style={{ marginBottom: '1rem' }}>Alerts</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
+            <div>
+              <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Unpaid Rent</div>
+              {unpaidTenants.length === 0 ? (
+                <div style={{ color: 'var(--text-secondary)' }}>No unpaid tenants this month.</div>
+              ) : (
+                unpaidTenants.slice(0, 4).map((tenant) => (
+                  <div key={tenant.id} style={{ color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
+                    {tenant.name} | {tenant.roomName} | Bed {tenant.bedNumber}
+                  </div>
+                ))
+              )}
+            </div>
+            <div>
+              <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Expiring Within 7 Days</div>
+              {expiringTenants.length === 0 ? (
+                <div style={{ color: 'var(--text-secondary)' }}>No contracts expiring soon.</div>
+              ) : (
+                expiringTenants.slice(0, 4).map((tenant) => (
+                  <div key={tenant.id} style={{ color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
+                    {tenant.name} | {tenant.roomName} | Bed {tenant.bedNumber} | {tenant.daysToExpiry} day(s)
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </Card>
+      )}
 
       <Card>
         <h2 style={{ marginBottom: '1rem' }}>Unpaid This Month</h2>

@@ -4,6 +4,7 @@ import { format, lastDayOfMonth, startOfMonth } from 'date-fns';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { Input } from '../../components/ui/Input';
+import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -13,6 +14,7 @@ import {
   isMissingTableError,
   writeActivityLog,
 } from '../../lib/admin';
+import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { supabase } from '../../lib/supabase';
 
@@ -35,6 +37,7 @@ const EXPENSES_CACHE_KEY = 'expenses-page';
 export const Expenses = () => {
   const { settings } = useAppSettings();
   const { user } = useAuth();
+  const { selectedPropertyId } = useAdminProperty();
   const [expenses, setExpenses] = useState<ExpenseRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
@@ -42,6 +45,7 @@ export const Expenses = () => {
   const [schemaReady, setSchemaReady] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(getMonthInputValue(new Date()));
+  const [alerts, setAlerts] = useState<AdminAlertsData>({ unpaidTenants: [], expiringTenants: [] });
   const [formData, setFormData] = useState(INITIAL_FORM_STATE);
 
   const fetchExpenses = useCallback(async () => {
@@ -94,6 +98,17 @@ export const Expenses = () => {
   useEffect(() => {
     void fetchExpenses();
   }, [fetchExpenses]);
+
+  useEffect(() => {
+    const cachedAlerts = getCachedAdminAlerts(selectedPropertyId);
+    if (cachedAlerts) {
+      setAlerts(cachedAlerts);
+    }
+
+    fetchAdminAlerts(selectedPropertyId)
+      .then(setAlerts)
+      .catch((error) => console.error('Expense alerts error:', error));
+  }, [expenses, selectedPropertyId]);
 
   const selectedMonthStart = useMemo(() => startOfMonth(new Date(`${selectedMonth}-01`)), [selectedMonth]);
   const selectedMonthEnd = useMemo(() => lastDayOfMonth(selectedMonthStart), [selectedMonthStart]);
@@ -238,6 +253,16 @@ export const Expenses = () => {
           <h3 style={{ marginBottom: '0.5rem' }}>Add expense categories in Settings</h3>
           <p style={{ color: 'var(--text-secondary)' }}>
             The expense form now uses a dropdown. Add one or more categories on the Settings page to start recording expenses.
+          </p>
+        </Card>
+      )}
+
+      {(alerts.unpaidTenants.length > 0 || alerts.expiringTenants.length > 0) && (
+        <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <h3 style={{ marginBottom: '0.5rem' }}>Alerts</h3>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            {alerts.unpaidTenants.length > 0 ? `${alerts.unpaidTenants.length} tenant(s) are unpaid or partial this month. ` : ''}
+            {alerts.expiringTenants.length > 0 ? `${alerts.expiringTenants.length} contract(s) expire within 7 days.` : ''}
           </p>
         </Card>
       )}

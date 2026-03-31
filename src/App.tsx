@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { AdminPropertyProvider } from './contexts/AdminPropertyContext';
 import { AppSettingsProvider } from './contexts/AppSettingsContext';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { Sidebar } from './components/layout/Sidebar';
@@ -12,16 +13,30 @@ import { Rooms as AdminRooms } from './pages/admin/Rooms';
 import { Tenants as AdminTenants } from './pages/admin/Tenants';
 import { Payments as AdminPayments } from './pages/admin/Payments';
 import { Settings as AdminSettings } from './pages/admin/Settings';
+import { Users as AdminUsers } from './pages/admin/Users';
 import { TenantDashboard } from './pages/tenant/Dashboard';
+import { Unauthorized } from './pages/Unauthorized';
+import { AppRole, getDefaultRouteForRole } from './lib/rbac';
 
-const ProtectedRoute = ({ children, allowedRole }: { children: React.ReactNode, allowedRole?: 'admin' | 'tenant' }) => {
+const ProtectedRoute = ({ children, allowedRoles }: { children: React.ReactNode, allowedRoles?: AppRole[] }) => {
   const { user, role, isLoading } = useAuth();
+  const location = useLocation();
 
   if (isLoading) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>Loading...</div>;
   if (!user) return <Navigate to="/login" />;
   if (!role) return <Navigate to="/login" replace />;
-  if (allowedRole && role && role !== allowedRole) {
-    return <Navigate to={role === 'admin' ? '/admin' : '/tenant'} />;
+  if (allowedRoles && !allowedRoles.includes(role)) {
+    return (
+      <Navigate
+        to="/unauthorized"
+        replace
+        state={{
+          from: location.pathname,
+          redirectTo: getDefaultRouteForRole(role),
+          message: `This page is only available for ${allowedRoles.join(', ')} users.`,
+        }}
+      />
+    );
   }
 
   return <>{children}</>;
@@ -68,18 +83,20 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
+      <Route path="/unauthorized" element={<Unauthorized />} />
       
       {/* Admin Routes */}
       <Route path="/admin/*" element={
-        <ProtectedRoute allowedRole="admin">
+        <ProtectedRoute allowedRoles={['super_admin', 'owner', 'manager']}>
           <AppLayout>
             <Routes>
-              <Route path="/" element={<AdminDashboard />} />
-              <Route path="/rooms" element={<AdminRooms />} />
-              <Route path="/tenants" element={<AdminTenants />} />
-              <Route path="/payments" element={<AdminPayments />} />
-              <Route path="/expenses" element={<AdminExpenses />} />
-              <Route path="/settings" element={<AdminSettings />} />
+              <Route path="/" element={<ProtectedRoute allowedRoles={['super_admin', 'owner', 'manager']}><AdminDashboard /></ProtectedRoute>} />
+              <Route path="/rooms" element={<ProtectedRoute allowedRoles={['super_admin', 'owner']}><AdminRooms /></ProtectedRoute>} />
+              <Route path="/tenants" element={<ProtectedRoute allowedRoles={['super_admin', 'owner', 'manager']}><AdminTenants /></ProtectedRoute>} />
+              <Route path="/payments" element={<ProtectedRoute allowedRoles={['super_admin', 'owner', 'manager']}><AdminPayments /></ProtectedRoute>} />
+              <Route path="/expenses" element={<ProtectedRoute allowedRoles={['super_admin', 'owner', 'manager']}><AdminExpenses /></ProtectedRoute>} />
+              <Route path="/users" element={<ProtectedRoute allowedRoles={['super_admin']}><AdminUsers /></ProtectedRoute>} />
+              <Route path="/settings" element={<ProtectedRoute allowedRoles={['super_admin']}><AdminSettings /></ProtectedRoute>} />
             </Routes>
           </AppLayout>
         </ProtectedRoute>
@@ -87,7 +104,7 @@ function AppRoutes() {
 
       {/* Tenant Routes */}
       <Route path="/tenant/*" element={
-        <ProtectedRoute allowedRole="tenant">
+        <ProtectedRoute allowedRoles={['tenant']}>
           <AppLayout>
             <Routes>
               <Route path="/" element={<TenantDashboard />} />
@@ -99,11 +116,12 @@ function AppRoutes() {
       {/* Root redirect */}
       <Route path="/" element={
         user ? (
-          <Navigate to={role === 'admin' ? '/admin' : '/tenant'} replace />
+          <Navigate to={getDefaultRouteForRole(role)} replace />
         ) : (
           <Navigate to="/login" replace />
         )
       } />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
@@ -112,9 +130,11 @@ function App() {
   return (
     <AppSettingsProvider>
       <AuthProvider>
-        <Router>
-          <AppRoutes />
-        </Router>
+        <AdminPropertyProvider>
+          <Router>
+            <AppRoutes />
+          </Router>
+        </AdminPropertyProvider>
       </AuthProvider>
     </AppSettingsProvider>
   );

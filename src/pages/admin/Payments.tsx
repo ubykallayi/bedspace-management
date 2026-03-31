@@ -3,7 +3,9 @@ import { format, lastDayOfMonth, startOfMonth } from 'date-fns';
 import { CheckCircle2, Download, MessageCircle, Pencil, ReceiptText, Search, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Input } from '../../components/ui/Input';
+import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -24,6 +26,7 @@ import {
   PaymentReceiptData,
 } from '../../lib/receipts';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
+import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
 import { supabase } from '../../lib/supabase';
 
 type RoomRecord = {
@@ -35,6 +38,7 @@ type BedRecord = {
   id: string;
   bed_number: string;
   room_id: string;
+  property_id?: string;
 };
 
 type TenantSummary = {
@@ -48,6 +52,7 @@ type TenantSummary = {
   start_date: string;
   end_date: string | null;
   is_active?: boolean;
+  property_id?: string;
   room?: RoomRecord | null;
   bed?: BedRecord | null;
 };
@@ -80,6 +85,7 @@ const PAYMENTS_CACHE_KEY = 'payments-page';
 export const Payments = () => {
   const { settings } = useAppSettings();
   const { user } = useAuth();
+  const { selectedProperty, selectedPropertyId, isLoading: propertiesLoading, error: propertiesError } = useAdminProperty();
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,6 +99,8 @@ export const Payments = () => {
   const [cycleStatusFilter, setCycleStatusFilter] = useState('all');
   const [tenantFilter, setTenantFilter] = useState('all');
   const [showFilters, setShowFilters] = useState(false);
+  const [alerts, setAlerts] = useState<AdminAlertsData>({ unpaidTenants: [], expiringTenants: [] });
+  const [pendingDeletePaymentId, setPendingDeletePaymentId] = useState<string | null>(null);
   const formCardRef = useRef<HTMLDivElement | null>(null);
 
   const [formData, setFormData] = useState({
@@ -119,11 +127,21 @@ export const Payments = () => {
   });
 
   const fetchData = useCallback(async () => {
+    if (!selectedPropertyId) {
+      setPayments([]);
+      setTenants([]);
+      setPaymentSchemaSupportsAudit(false);
+      setFetchError('');
+      setLoading(false);
+      return;
+    }
+
+    const cacheKey = `${PAYMENTS_CACHE_KEY}:${selectedPropertyId}`;
     const cached = getCachedAdminData<{
       payments: PaymentRecord[];
       tenants: TenantSummary[];
       paymentSchemaSupportsAudit: boolean;
-    }>(PAYMENTS_CACHE_KEY);
+    }>(cacheKey);
 
     if (cached) {
       setPayments(cached.payments);
@@ -137,33 +155,6 @@ export const Payments = () => {
 
     let paymentRows: PaymentRecord[] = [];
     let paymentAuditEnabled = true;
-
-    const enhancedPayments = await supabase
-      .from('payments')
-      .select(ENHANCED_PAYMENT_SELECT)
-      .order('payment_date', { ascending: false });
-
-    if (enhancedPayments.error) {
-      if (isMissingColumnError(enhancedPayments.error)) {
-        paymentAuditEnabled = false;
-        const fallbackPayments = await supabase
-          .from('payments')
-          .select(BASE_PAYMENT_SELECT)
-          .order('payment_date', { ascending: false });
-
-        if (fallbackPayments.error) {
-          console.error('Payment fetch error:', fallbackPayments.error);
-          setFetchError(fallbackPayments.error.message || 'Unable to load payment records.');
-        } else {
-          paymentRows = (fallbackPayments.data ?? []) as PaymentRecord[];
-        }
-      } else {
-        console.error('Payment fetch error:', enhancedPayments.error);
-        setFetchError(enhancedPayments.error.message || 'Unable to load payment records.');
-      }
-    } else {
-      paymentRows = (enhancedPayments.data ?? []) as PaymentRecord[];
-    }
 
     let tenantRows:
       | Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>
@@ -181,6 +172,7 @@ export const Payments = () => {
       const tenantResult = await supabase
         .from('tenants')
         .select(tenantSelect)
+        .eq('property_id', selectedPropertyId)
         .order('start_date', { ascending: false });
 
       if (!tenantResult.error) {
@@ -198,8 +190,8 @@ export const Payments = () => {
       { data: bedRows, error: bedError },
       { data: roomRows, error: roomError },
     ] = await Promise.all([
-      supabase.from('beds').select('id, bed_number, room_id'),
-      supabase.from('rooms').select('id, name'),
+      supabase.from('beds').select('id, bed_number, room_id, property_id').eq('property_id', selectedPropertyId),
+      supabase.from('rooms').select('id, name').eq('property_id', selectedPropertyId),
     ]);
 
     if (tenantErrorMessage) {
@@ -220,6 +212,38 @@ export const Payments = () => {
       (bedRows ?? []) as BedRecord[],
       (roomRows ?? []) as RoomRecord[],
     );
+
+    const propertyTenantIds = enhancedTenants.map((tenant) => tenant.id);
+    if (propertyTenantIds.length > 0) {
+      const enhancedPayments = await supabase
+        .from('payments')
+        .select(ENHANCED_PAYMENT_SELECT)
+        .in('tenant_id', propertyTenantIds)
+        .order('payment_date', { ascending: false });
+
+      if (enhancedPayments.error) {
+        if (isMissingColumnError(enhancedPayments.error)) {
+          paymentAuditEnabled = false;
+          const fallbackPayments = await supabase
+            .from('payments')
+            .select(BASE_PAYMENT_SELECT)
+            .in('tenant_id', propertyTenantIds)
+            .order('payment_date', { ascending: false });
+
+          if (fallbackPayments.error) {
+            console.error('Payment fetch error:', fallbackPayments.error);
+            setFetchError((current) => current || fallbackPayments.error.message || 'Unable to load payment records.');
+          } else {
+            paymentRows = (fallbackPayments.data ?? []) as PaymentRecord[];
+          }
+        } else {
+          console.error('Payment fetch error:', enhancedPayments.error);
+          setFetchError((current) => current || enhancedPayments.error.message || 'Unable to load payment records.');
+        }
+      } else {
+        paymentRows = (enhancedPayments.data ?? []) as PaymentRecord[];
+      }
+    }
 
     const paidTotals = new Map<string, number>();
     paymentRows.forEach((payment) => {
@@ -253,13 +277,13 @@ export const Payments = () => {
     setPaymentSchemaSupportsAudit(paymentAuditEnabled);
     setTenants(enhancedTenants);
     setPayments(enhancedPaymentsWithStatus);
-    setCachedAdminData(PAYMENTS_CACHE_KEY, {
+    setCachedAdminData(cacheKey, {
       payments: enhancedPaymentsWithStatus,
       tenants: enhancedTenants,
       paymentSchemaSupportsAudit: paymentAuditEnabled,
     });
     setLoading(false);
-  }, []);
+  }, [selectedPropertyId]);
 
   const buildReceiptData = useCallback((payment: {
     id: string;
@@ -315,9 +339,25 @@ export const Payments = () => {
     void fetchData();
   }, [fetchData]);
 
+  useEffect(() => {
+    const cachedAlerts = getCachedAdminAlerts(selectedPropertyId);
+    if (cachedAlerts) {
+      setAlerts(cachedAlerts);
+    }
+
+    fetchAdminAlerts(selectedPropertyId)
+      .then(setAlerts)
+      .catch((error) => console.error('Payment alerts error:', error));
+  }, [payments, selectedPropertyId]);
+
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
+
+    if (!selectedPropertyId) {
+      setFormError('Please select a property before recording a payment.');
+      return;
+    }
 
     if (!formData.tenant_id) {
       setFormError('Please select a tenant.');
@@ -436,8 +476,6 @@ export const Payments = () => {
   };
 
   const handleDeletePayment = async (paymentId: string) => {
-    if (!confirm('Delete this payment record?')) return;
-
     const payment = payments.find((item) => item.id === paymentId);
     const { error } = await supabase.from('payments').delete().eq('id', paymentId);
     if (error) {
@@ -614,6 +652,30 @@ export const Payments = () => {
     );
   }
 
+  if (propertiesLoading) {
+    return (
+      <div className="page-container">
+        <Card>
+          <h2 style={{ marginBottom: '0.5rem' }}>Loading properties...</h2>
+          <p style={{ color: 'var(--text-secondary)' }}>We are loading the property list before opening the payment ledger.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!selectedPropertyId) {
+    return (
+      <div className="page-container">
+        <Card style={{ borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <h2 style={{ marginBottom: '0.75rem' }}>No property selected</h2>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+            {propertiesError || 'Create your first property in Settings to start recording rent payments.'}
+          </p>
+        </Card>
+      </div>
+    );
+  }
+
   if (fetchError) {
     return (
       <div className="page-container">
@@ -634,7 +696,9 @@ export const Payments = () => {
       <div className="page-header">
         <div>
           <h1 className="page-title">Rent Payments</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Track collections, see who is unpaid this month, and export reports for finance follow-up.</p>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            Track collections, see who is unpaid this month, and export reports for {selectedProperty?.name ?? 'the selected property'}.
+          </p>
         </div>
         <div className="admin-toolbar">
           <Button variant="secondary" onClick={() => setShowFilters((value) => !value)}>
@@ -657,6 +721,16 @@ export const Payments = () => {
           <h3 style={{ marginBottom: '0.5rem' }}>Payment audit stamps need one SQL migration</h3>
           <p style={{ color: 'var(--text-secondary)' }}>
             The page is fully usable now. `payments.updated_at` and `payments.updated_by` will start saving automatically after you add those columns in Supabase.
+          </p>
+        </Card>
+      )}
+
+      {(alerts.unpaidTenants.length > 0 || alerts.expiringTenants.length > 0) && (
+        <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)' }}>
+          <h3 style={{ marginBottom: '0.5rem' }}>Alerts</h3>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            {alerts.unpaidTenants.length > 0 ? `${alerts.unpaidTenants.length} tenant(s) are unpaid or partial this month. ` : ''}
+            {alerts.expiringTenants.length > 0 ? `${alerts.expiringTenants.length} contract(s) expire within 7 days.` : ''}
           </p>
         </Card>
       )}
@@ -882,7 +956,7 @@ export const Payments = () => {
         </div>
 
         {filteredPayments.map((payment) => (
-          <div key={payment.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr auto', padding: '1rem', borderBottom: '1px solid rgba(255,255,255,0.05)', alignItems: 'center', background: editingPaymentId === payment.id ? 'rgba(123, 97, 255, 0.08)' : undefined }}>
+          <div key={payment.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr auto', padding: '1rem', borderBottom: '1px solid rgba(255,255,255,0.05)', alignItems: 'center', background: editingPaymentId === payment.id ? 'rgba(123, 97, 255, 0.08)' : payment.cycleStatus === 'unpaid' ? 'rgba(127, 29, 29, 0.12)' : payment.cycleStatus === 'partial' ? 'rgba(120, 53, 15, 0.12)' : undefined }}>
             <div>
               <div style={{ fontWeight: 500 }}>{payment.tenant?.name}</div>
               <div style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>{payment.tenant?.email}</div>
@@ -920,7 +994,7 @@ export const Payments = () => {
               <button onClick={() => handleEditPayment(payment)} style={{ color: 'var(--secondary)', padding: '0.25rem' }}>
                 <Pencil size={16} />
               </button>
-              <button onClick={() => void handleDeletePayment(payment.id)} style={{ color: 'var(--danger)', padding: '0.25rem' }}>
+              <button onClick={() => setPendingDeletePaymentId(payment.id)} style={{ color: 'var(--danger)', padding: '0.25rem' }}>
                 <Trash2 size={16} />
               </button>
             </div>
@@ -940,6 +1014,19 @@ export const Payments = () => {
         )}
         </div>
       </Card>
+      <ConfirmDialog
+        open={pendingDeletePaymentId !== null}
+        title="Delete Payment"
+        message="Delete this payment record? This action cannot be undone."
+        confirmLabel="Delete"
+        tone="danger"
+        onCancel={() => setPendingDeletePaymentId(null)}
+        onConfirm={async () => {
+          if (!pendingDeletePaymentId) return;
+          await handleDeletePayment(pendingDeletePaymentId);
+          setPendingDeletePaymentId(null);
+        }}
+      />
     </div>
   );
 };

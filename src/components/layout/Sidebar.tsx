@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabase';
 import { LayoutDashboard, Users, DoorOpen, LogOut, Receipt, Settings as SettingsIcon, Wallet, X } from 'lucide-react';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
 import { useAuth } from '../../contexts/AuthContext';
+import { canAccessRooms, canAccessSettings, canManageUsers, isAdminRole } from '../../lib/rbac';
 
 type SidebarProps = {
   isOpen?: boolean;
@@ -22,18 +23,25 @@ export const Sidebar = ({ isOpen = false, onClose }: SidebarProps) => {
 
   const adminLinks = [
     { to: '/admin', icon: LayoutDashboard, label: 'Dashboard' },
-    { to: '/admin/rooms', icon: DoorOpen, label: 'Rooms & Beds' },
     { to: '/admin/tenants', icon: Users, label: 'Tenants' },
     { to: '/admin/payments', icon: Receipt, label: 'Payments' },
     { to: '/admin/expenses', icon: Wallet, label: 'Expenses' },
-    { to: '/admin/settings', icon: SettingsIcon, label: 'Settings' },
   ];
+  if (canAccessRooms(role)) {
+    adminLinks.splice(1, 0, { to: '/admin/rooms', icon: DoorOpen, label: 'Rooms & Beds' });
+  }
+  if (canManageUsers(role)) {
+    adminLinks.push({ to: '/admin/users', icon: Users, label: 'Users' });
+  }
+  if (canAccessSettings(role)) {
+    adminLinks.push({ to: '/admin/settings', icon: SettingsIcon, label: 'Settings' });
+  }
 
   const tenantLinks = [
     { to: '/tenant', icon: LayoutDashboard, label: 'My Dashboard' },
   ];
 
-  const links = role === 'admin' ? adminLinks : tenantLinks;
+  const links = isAdminRole(role) ? adminLinks : tenantLinks;
 
   return (
     <aside className={`sidebar-shell ${isOpen ? 'is-open' : ''}`}>
