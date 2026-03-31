@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CloudUpload, RotateCcw, Pencil, Save, Trash2 } from 'lucide-react';
+import { CloudUpload, RotateCcw, Pencil, Plus, Save, Trash2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
@@ -38,6 +38,7 @@ export const Settings = () => {
   const [editingPropertyId, setEditingPropertyId] = useState<string | null>(null);
   const [editingPropertyName, setEditingPropertyName] = useState('');
   const [editingPropertyLocation, setEditingPropertyLocation] = useState('');
+  const [showCreatePropertyForm, setShowCreatePropertyForm] = useState(false);
   const [pendingDeletePropertyId, setPendingDeletePropertyId] = useState<string | null>(null);
   const [backupState, setBackupState] = useState<{
     isUploading: boolean;
@@ -137,6 +138,7 @@ export const Settings = () => {
     });
     setPropertyName('');
     setPropertyLocation('');
+    setShowCreatePropertyForm(false);
     setPropertySuccess('Property created successfully.');
   };
 
@@ -401,7 +403,6 @@ export const Settings = () => {
       <div className="page-header">
         <div>
           <h1 className="page-title">Settings</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Manage branding, currency display, and contact details for this property.</p>
         </div>
       </div>
 
@@ -413,11 +414,24 @@ export const Settings = () => {
       )}
 
       <Card style={{ marginBottom: '1.5rem' }}>
-        <div style={{ marginBottom: '1rem' }}>
-          <h2 style={{ marginBottom: '0.35rem' }}>Properties</h2>
-          <p style={{ color: 'var(--text-secondary)' }}>
-            Create and switch between multiple properties for rooms, beds, tenants, and payment tracking.
-          </p>
+        <div style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          <h2 style={{ margin: 0 }}>Properties</h2>
+          <Button
+            type="button"
+            variant={showCreatePropertyForm ? 'secondary' : 'primary'}
+            onClick={() => {
+              setShowCreatePropertyForm((current) => !current);
+              setPropertyError('');
+              setPropertySuccess('');
+              if (showCreatePropertyForm) {
+                setPropertyName('');
+                setPropertyLocation('');
+              }
+            }}
+          >
+            <Plus size={16} />
+            {showCreatePropertyForm ? 'Close Add Property' : 'Add Property'}
+          </Button>
         </div>
 
         {propertiesError && (
@@ -426,26 +440,31 @@ export const Settings = () => {
           </div>
         )}
 
-        <form onSubmit={handleCreateProperty} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', alignItems: 'end', marginBottom: '1.5rem' }}>
-          <Input
-            label="Property Name"
-            value={propertyName}
-            onChange={(event) => setPropertyName(event.target.value)}
-            placeholder="e.g. Al Nahda Building"
-            required
-          />
-          <Input
-            label="Location"
-            value={propertyLocation}
-            onChange={(event) => setPropertyLocation(event.target.value)}
-            placeholder="e.g. Dubai, Al Nahda"
-          />
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <Button type="submit" disabled={propertiesLoading}>
-              Add Property
-            </Button>
-          </div>
-        </form>
+        {showCreatePropertyForm ? (
+          <form onSubmit={handleCreateProperty} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', alignItems: 'end', marginBottom: '1.5rem' }}>
+            <Input
+              label="Property Name"
+              value={propertyName}
+              onChange={(event) => setPropertyName(event.target.value)}
+              placeholder="e.g. Al Nahda Building"
+              required
+            />
+            <Input
+              label="Location"
+              value={propertyLocation}
+              onChange={(event) => setPropertyLocation(event.target.value)}
+              placeholder="e.g. Dubai, Al Nahda"
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <Button type="button" variant="secondary" onClick={() => setShowCreatePropertyForm(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={propertiesLoading}>
+                Save Property
+              </Button>
+            </div>
+          </form>
+        ) : null}
 
         {propertyError && (
           <div style={{ color: 'var(--danger)', fontSize: '0.875rem', padding: '0.75rem 1rem', background: 'var(--danger-bg)', borderRadius: 'var(--radius-sm)', marginBottom: '1rem' }}>

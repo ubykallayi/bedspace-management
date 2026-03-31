@@ -35,6 +35,7 @@ export const Users = () => {
   const [newUserPassword, setNewUserPassword] = useState('');
   const [newUserRole, setNewUserRole] = useState<AppRole>('tenant');
   const [newUserPropertyIds, setNewUserPropertyIds] = useState<string[]>([]);
+  const [showCreateForm, setShowCreateForm] = useState(false);
   const [pendingStatusUser, setPendingStatusUser] = useState<ManagedUser | null>(null);
   const [pendingDeleteUser, setPendingDeleteUser] = useState<ManagedUser | null>(null);
 
@@ -188,6 +189,7 @@ export const Users = () => {
     setNewUserPassword('');
     setNewUserRole('tenant');
     setNewUserPropertyIds([]);
+    setShowCreateForm(false);
   };
 
   const handleCreateUser = async (event: React.FormEvent) => {
@@ -406,10 +408,30 @@ export const Users = () => {
       <div className="page-header">
         <div>
           <h1 className="page-title">Users</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Access, roles, and property allocation.</p>
+        </div>
+        <div className="admin-toolbar">
+          <Button
+            type="button"
+            variant={showCreateForm ? 'secondary' : 'primary'}
+            onClick={() => {
+              setShowCreateForm((current) => !current);
+              setUserError('');
+              setUserSuccess('');
+              if (showCreateForm) {
+                setNewUserEmail('');
+                setNewUserPassword('');
+                setNewUserRole('tenant');
+                setNewUserPropertyIds([]);
+              }
+            }}
+          >
+            <UserPlus size={16} />
+            {showCreateForm ? 'Close Add User' : 'Add User'}
+          </Button>
         </div>
       </div>
 
+      {showCreateForm ? (
       <Card style={{ marginBottom: '1.5rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', marginBottom: '1rem' }}>
           <div style={{ width: '44px', height: '44px', borderRadius: '999px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-glow)', flexShrink: 0 }}>
@@ -464,6 +486,7 @@ export const Users = () => {
           )}
         </form>
       </Card>
+      ) : null}
 
       {(userError || userSuccess) && (
         <Card style={{ marginBottom: '1.5rem', borderColor: userError ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.3)' }}>
