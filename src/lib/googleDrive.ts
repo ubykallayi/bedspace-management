@@ -2,6 +2,7 @@ import { getAppSettingsSnapshot } from '../contexts/AppSettingsContext';
 
 const GOOGLE_IDENTITY_SCRIPT = 'https://accounts.google.com/gsi/client';
 const DRIVE_UPLOAD_ENDPOINT = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink';
+const DRIVE_FILES_ENDPOINT = 'https://www.googleapis.com/drive/v3/files';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
 type GoogleTokenResponse = {
@@ -36,6 +37,14 @@ declare global {
 export type GoogleDriveUploadResult = {
   id: string;
   name: string;
+  webViewLink?: string;
+};
+
+export type GoogleDriveFile = {
+  id: string;
+  name: string;
+  createdTime?: string;
+  modifiedTime?: string;
   webViewLink?: string;
 };
 
@@ -170,4 +179,49 @@ export const uploadJsonBackupToGoogleDrive = async ({
   }
 
   return await response.json() as GoogleDriveUploadResult;
+};
+
+export const listGoogleDriveBackups = async () => {
+  const accessToken = await authenticateGoogleDrive();
+  const query = encodeURIComponent("mimeType='application/json' and name contains 'backup-' and trashed=false");
+  const fields = encodeURIComponent('files(id,name,createdTime,modifiedTime,webViewLink)');
+  const response = await fetch(`${DRIVE_FILES_ENDPOINT}?q=${query}&fields=${fields}&orderBy=modifiedTime desc&pageSize=20`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (response.status === 401) {
+    cachedAccessToken = null;
+    throw new Error('Google authorization expired. Please connect to Google Drive again.');
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || 'Unable to load Google Drive backup files.');
+  }
+
+  const payload = await response.json() as { files?: GoogleDriveFile[] };
+  return payload.files ?? [];
+};
+
+export const downloadGoogleDriveBackup = async (fileId: string) => {
+  const accessToken = await authenticateGoogleDrive();
+  const response = await fetch(`${DRIVE_FILES_ENDPOINT}/${fileId}?alt=media`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (response.status === 401) {
+    cachedAccessToken = null;
+    throw new Error('Google authorization expired. Please connect to Google Drive again.');
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || 'Unable to download the selected Google Drive backup.');
+  }
+
+  return await response.text();
 };

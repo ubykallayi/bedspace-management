@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { Pencil, Save, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { CloudUpload, RotateCcw, Pencil, Save, Trash2 } from 'lucide-react';
+import { format } from 'date-fns';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -8,12 +9,14 @@ import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { AppSettings, useAppSettings } from '../../contexts/AppSettingsContext';
 import { writeActivityLog } from '../../lib/admin';
+import { buildBackupFileName, fetchBackupPayload, restoreBackupPayload, type BackupPayload } from '../../lib/backup';
+import { downloadGoogleDriveBackup, listGoogleDriveBackups, type GoogleDriveFile, uploadJsonBackupToGoogleDrive } from '../../lib/googleDrive';
 import { supabase } from '../../lib/supabase';
 
 type SettingsFormState = AppSettings;
 
 export const Settings = () => {
-  const { user } = useAuth();
+  const { user, role } = useAuth();
   const { settings, isLoading, error, refreshSettings } = useAppSettings();
   const {
     properties,
@@ -36,6 +39,21 @@ export const Settings = () => {
   const [editingPropertyName, setEditingPropertyName] = useState('');
   const [editingPropertyLocation, setEditingPropertyLocation] = useState('');
   const [pendingDeletePropertyId, setPendingDeletePropertyId] = useState<string | null>(null);
+  const [backupState, setBackupState] = useState<{
+    isUploading: boolean;
+    isRestoring: boolean;
+    message: string;
+    tone: 'success' | 'danger';
+  }>({
+    isUploading: false,
+    isRestoring: false,
+    message: '',
+    tone: 'success',
+  });
+  const [pendingRestorePayload, setPendingRestorePayload] = useState<BackupPayload | null>(null);
+  const [driveBackups, setDriveBackups] = useState<GoogleDriveFile[]>([]);
+  const [showDriveRestoreList, setShowDriveRestoreList] = useState(false);
+  const restoreInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setFormData(settings);
@@ -190,6 +208,183 @@ export const Settings = () => {
     setPropertySuccess('Property deleted successfully.');
   };
 
+  const handleBackupData = async () => {
+    if (!role) return;
+
+    setBackupState((current) => ({
+      ...current,
+      isUploading: true,
+      message: '',
+      tone: 'success',
+    }));
+
+    try {
+      const payload = await fetchBackupPayload({
+        role,
+        selectedPropertyId,
+        selectedPropertyName: properties.find((property) => property.id === selectedPropertyId)?.name,
+      });
+      const filename = buildBackupFileName();
+      const uploadResult = await uploadJsonBackupToGoogleDrive({
+        filename,
+        jsonContent: JSON.stringify(payload, null, 2),
+      });
+
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: `Backup uploaded successfully to Google Drive as ${uploadResult.name}.`,
+        tone: 'success',
+      });
+    } catch (backupError) {
+      console.error('Backup upload error:', backupError);
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: backupError instanceof Error ? backupError.message : 'Backup failed. Please try again.',
+        tone: 'danger',
+      });
+    }
+  };
+
+  const handlePickRestoreFile = () => {
+    restoreInputRef.current?.click();
+  };
+
+  const handleLoadDriveBackups = async () => {
+    setBackupState((current) => ({
+      ...current,
+      isRestoring: true,
+      message: '',
+      tone: 'success',
+    }));
+
+    try {
+      const files = await listGoogleDriveBackups();
+      setDriveBackups(files);
+      setShowDriveRestoreList(true);
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: files.length === 0 ? 'No Google Drive backups were found.' : 'Choose a Google Drive backup to restore.',
+        tone: files.length === 0 ? 'danger' : 'success',
+      });
+    } catch (driveError) {
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: driveError instanceof Error ? driveError.message : 'Unable to load Google Drive backups.',
+        tone: 'danger',
+      });
+    }
+  };
+
+  const handleSelectDriveBackup = async (file: GoogleDriveFile) => {
+    setBackupState({
+      isUploading: false,
+      isRestoring: true,
+      message: '',
+      tone: 'success',
+    });
+
+    try {
+      const rawContent = await downloadGoogleDriveBackup(file.id);
+      const parsed = JSON.parse(rawContent) as BackupPayload;
+
+      if (!parsed?.tables || !parsed?.generated_at) {
+        throw new Error('The selected Google Drive file is not a valid BedSpace backup.');
+      }
+
+      setPendingRestorePayload(parsed);
+      setShowDriveRestoreList(false);
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: `Loaded ${file.name}. Confirm restore to continue.`,
+        tone: 'success',
+      });
+    } catch (driveError) {
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: driveError instanceof Error ? driveError.message : 'Unable to load the selected Google Drive backup.',
+        tone: 'danger',
+      });
+    }
+  };
+
+  const handleRestoreFileSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) return;
+
+    try {
+      const rawContent = await file.text();
+      const parsed = JSON.parse(rawContent) as BackupPayload;
+
+      if (!parsed?.tables || !parsed?.generated_at) {
+        setBackupState({
+          isUploading: false,
+          isRestoring: false,
+          message: 'This file does not look like a valid BedSpace backup.',
+          tone: 'danger',
+        });
+        return;
+      }
+
+      setPendingRestorePayload(parsed);
+    } catch (restoreError) {
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: restoreError instanceof Error ? restoreError.message : 'Unable to read the backup file.',
+        tone: 'danger',
+      });
+    }
+  };
+
+  const handleConfirmRestore = async () => {
+    if (!pendingRestorePayload) return;
+
+    setBackupState({
+      isUploading: false,
+      isRestoring: true,
+      message: '',
+      tone: 'success',
+    });
+
+    try {
+      await restoreBackupPayload(pendingRestorePayload);
+      await refreshSettings();
+
+      await writeActivityLog({
+        action: 'backup.restored',
+        entityType: 'backup',
+        entityId: pendingRestorePayload.generated_at,
+        description: `Restored backup generated at ${pendingRestorePayload.generated_at}.`,
+        actorId: user?.id,
+      });
+
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: 'Backup restored successfully. Refresh any open pages to see the latest restored data.',
+        tone: 'success',
+      });
+    } catch (restoreError) {
+      console.error('Restore error:', restoreError);
+      setBackupState({
+        isUploading: false,
+        isRestoring: false,
+        message: restoreError instanceof Error ? restoreError.message : 'Restore failed. Please try again.',
+        tone: 'danger',
+      });
+    } finally {
+      setPendingRestorePayload(null);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="page-container">
@@ -333,6 +528,10 @@ export const Settings = () => {
       </Card>
 
       <Card>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ marginBottom: 0 }}>Application Settings</h2>
+        </div>
+
         <form onSubmit={handleSave} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
           <Input
             label="Site Name"
@@ -410,6 +609,12 @@ export const Settings = () => {
             </div>
           )}
 
+          {backupState.message && (
+            <div style={{ gridColumn: '1 / -1', color: backupState.tone === 'danger' ? 'var(--danger)' : 'var(--success)', fontSize: '0.875rem', padding: '0.75rem 1rem', background: backupState.tone === 'danger' ? 'var(--danger-bg)' : 'var(--success-bg)', borderRadius: 'var(--radius-sm)' }}>
+              {backupState.message}
+            </div>
+          )}
+
           <p style={{ gridColumn: '1 / -1', color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>
             Currency Display controls how amounts appear in the UI. For example, using `AED` will show values like `AED 1200.00`.
           </p>
@@ -419,6 +624,63 @@ export const Settings = () => {
           <p style={{ gridColumn: '1 / -1', color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>
             Google Drive Client ID powers the backup button on the dashboard. Create a Google OAuth Web client, enable Google Drive API, and add your site URL to the authorized JavaScript origins.
           </p>
+
+          <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', alignItems: 'center', padding: '1rem', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', background: 'rgba(255,255,255,0.02)' }}>
+            <div>
+              <div style={{ fontWeight: 600, marginBottom: '0.35rem' }}>Backup & Restore</div>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                Backup uploads the latest JSON snapshot to Google Drive. Restore can use a local JSON file or a backup directly from Google Drive.
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <input
+                ref={restoreInputRef}
+                type="file"
+                accept="application/json,.json"
+                onChange={(event) => void handleRestoreFileSelected(event)}
+                style={{ display: 'none' }}
+              />
+              <Button type="button" variant="secondary" onClick={() => void handleBackupData()} isLoading={backupState.isUploading}>
+                <CloudUpload size={16} /> Backup To Drive
+              </Button>
+              <Button type="button" variant="secondary" onClick={handlePickRestoreFile} isLoading={backupState.isRestoring}>
+                <RotateCcw size={16} /> Restore File
+              </Button>
+              <Button type="button" variant="secondary" onClick={() => void handleLoadDriveBackups()} isLoading={backupState.isRestoring}>
+                <RotateCcw size={16} /> Restore From Drive
+              </Button>
+            </div>
+          </div>
+
+          {showDriveRestoreList && (
+            <div style={{ gridColumn: '1 / -1', padding: '1rem', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', background: 'rgba(255,255,255,0.02)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center', marginBottom: '0.85rem', flexWrap: 'wrap' }}>
+                <div style={{ fontWeight: 600 }}>Google Drive Backups</div>
+                <Button type="button" variant="secondary" onClick={() => setShowDriveRestoreList(false)}>
+                  Close
+                </Button>
+              </div>
+              {driveBackups.length === 0 ? (
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>No Drive backups found.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {driveBackups.map((file) => (
+                    <div key={file.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center', flexWrap: 'wrap', padding: '0.85rem 1rem', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-sm)', background: 'rgba(15, 23, 42, 0.35)' }}>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{file.name}</div>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                          {file.modifiedTime ? `Updated ${format(new Date(file.modifiedTime), 'MMM dd, yyyy h:mm a')}` : 'Google Drive backup'}
+                        </div>
+                      </div>
+                      <Button type="button" variant="secondary" onClick={() => void handleSelectDriveBackup(file)}>
+                        Restore
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end' }}>
             <Button type="submit" isLoading={saving}>
@@ -438,6 +700,17 @@ export const Settings = () => {
           if (!pendingDeletePropertyId) return;
           await handleDeleteProperty(pendingDeletePropertyId);
           setPendingDeletePropertyId(null);
+        }}
+      />
+      <ConfirmDialog
+        open={pendingRestorePayload !== null}
+        title="Restore Backup"
+        message="Restore this backup into the current database? This will upsert the backup data into the existing records."
+        confirmLabel="Restore"
+        tone="warning"
+        onCancel={() => setPendingRestorePayload(null)}
+        onConfirm={async () => {
+          await handleConfirmRestore();
         }}
       />
     </div>

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { addDays, format, lastDayOfMonth, startOfMonth } from 'date-fns';
-import { BedDouble, CheckCircle2, CloudUpload, DoorOpen, Download, XCircle } from 'lucide-react';
+import { BedDouble, CheckCircle2, DoorOpen, Download, XCircle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { useAdminProperty } from '../../contexts/AdminPropertyContext';
-import { useAuth } from '../../contexts/AuthContext';
 import {
   downloadCsv,
   formatCurrency,
@@ -15,9 +14,7 @@ import {
   isMissingColumnError,
   isMissingTableError,
 } from '../../lib/admin';
-import { buildBackupFileName, fetchBackupPayload } from '../../lib/backup';
 import { getCachedAdminData, setCachedAdminData } from '../../lib/adminDataCache';
-import { uploadJsonBackupToGoogleDrive } from '../../lib/googleDrive';
 import { supabase } from '../../lib/supabase';
 
 type RoomRecord = {
@@ -64,7 +61,6 @@ type OccupancyRow = {
 const DASHBOARD_CACHE_KEY = 'admin-dashboard';
 
 export const Dashboard = () => {
-  const { role } = useAuth();
   const { selectedProperty, selectedPropertyId, isLoading: propertiesLoading, error: propertiesError } = useAdminProperty();
   const [stats, setStats] = useState({
     rooms: 0,
@@ -100,15 +96,6 @@ export const Dashboard = () => {
   }>>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
-  const [backupState, setBackupState] = useState<{
-    isUploading: boolean;
-    message: string;
-    tone: 'success' | 'danger';
-  }>({
-    isUploading: false,
-    message: '',
-    tone: 'success',
-  });
 
   const fetchStats = useCallback(async () => {
     if (!selectedPropertyId) {
@@ -389,44 +376,6 @@ export const Dashboard = () => {
     );
   };
 
-  const handleBackupData = async () => {
-    if (!role) return;
-
-    setBackupState({
-      isUploading: true,
-      message: '',
-      tone: 'success',
-    });
-
-    try {
-      const payload = await fetchBackupPayload({
-        role,
-        selectedPropertyId,
-        selectedPropertyName: selectedProperty?.name,
-      });
-      const filename = buildBackupFileName();
-      const uploadResult = await uploadJsonBackupToGoogleDrive({
-        filename,
-        jsonContent: JSON.stringify(payload, null, 2),
-      });
-
-      setBackupState({
-        isUploading: false,
-        message: uploadResult.webViewLink
-          ? `Backup uploaded successfully to Google Drive as ${uploadResult.name}.`
-          : `Backup uploaded successfully to Google Drive as ${uploadResult.name}.`,
-        tone: 'success',
-      });
-    } catch (error) {
-      console.error('Backup upload error:', error);
-      setBackupState({
-        isUploading: false,
-        message: error instanceof Error ? error.message : 'Backup failed. Please try again.',
-        tone: 'danger',
-      });
-    }
-  };
-
   if (loading) {
     return (
       <div className="page-container">
@@ -487,9 +436,6 @@ export const Dashboard = () => {
           </p>
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <Button variant="secondary" onClick={() => void handleBackupData()} isLoading={backupState.isUploading}>
-            <CloudUpload size={16} /> Backup Data
-          </Button>
           <Button variant="secondary" onClick={exportCollectionsCsv}>
             <Download size={16} /> Collections CSV
           </Button>
@@ -501,23 +447,6 @@ export const Dashboard = () => {
           </Button>
         </div>
       </div>
-
-      {backupState.message && (
-        <Card style={{
-          marginBottom: '1.5rem',
-          borderColor: backupState.tone === 'danger' ? 'rgba(239, 68, 68, 0.35)' : 'rgba(34, 197, 94, 0.35)',
-        }}>
-          <h3 style={{ marginBottom: '0.5rem' }}>
-            {backupState.tone === 'danger' ? 'Backup failed' : 'Backup complete'}
-          </h3>
-          <p style={{ color: 'var(--text-secondary)' }}>{backupState.message}</p>
-          {backupState.tone === 'danger' && (
-            <p style={{ color: 'var(--text-tertiary)', marginTop: '0.75rem' }}>
-              Configure the Google Drive Client ID in Settings before using Drive backup.
-            </p>
-          )}
-        </Card>
-      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
         <Card style={{ borderLeft: '4px solid var(--primary)' }}>
