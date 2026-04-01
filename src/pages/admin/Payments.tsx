@@ -5,15 +5,16 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Input } from '../../components/ui/Input';
+import { MobileActionMenu } from '../../components/ui/MobileActionMenu';
 import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
+  calculateTenantBalanceForMonth,
   downloadCsv,
   formatCurrency,
   getMonthInputValue,
   getMonthStartKey,
-  getRentDueForBillingMonth,
   getMonthlyPaymentStatus,
   getPaymentStatusBadgeClass,
   getPaymentStatusLabel,
@@ -53,6 +54,7 @@ type TenantSummary = {
   end_date: string | null;
   is_active?: boolean;
   property_id?: string;
+  photo_url?: string | null;
   room?: RoomRecord | null;
   bed?: BedRecord | null;
 };
@@ -64,6 +66,7 @@ type PaymentRecord = {
   payment_date: string;
   billing_month: string;
   status: 'paid' | 'pending';
+  is_balance_waived?: boolean;
   updated_at?: string | null;
   updated_by?: string | null;
   tenant?: TenantSummary | null;
@@ -72,9 +75,26 @@ type PaymentRecord = {
   cycleStatus?: 'paid' | 'partial' | 'unpaid';
 };
 
+type ChargeRecord = {
+  tenant_id: string;
+  billing_month: string;
+  amount: number | string;
+  expenses?: {
+    description?: string | null;
+  } | Array<{
+    description?: string | null;
+  }> | null;
+};
+
+const getChargeDescription = (charge: ChargeRecord) => (
+  Array.isArray(charge.expenses)
+    ? charge.expenses[0]?.description
+    : charge.expenses?.description
+);
+
 const getCurrentBillingMonth = () => getMonthStartKey(new Date());
 
-const BASE_PAYMENT_SELECT = 'id, tenant_id, amount, payment_date, billing_month, status';
+const BASE_PAYMENT_SELECT = 'id, tenant_id, amount, payment_date, billing_month, status, is_balance_waived';
 const ENHANCED_PAYMENT_SELECT = `${BASE_PAYMENT_SELECT}, updated_at, updated_by`;
 const ENHANCED_TENANT_SELECT = 'id, name, email, phone, bed_id, rent_amount, prorated_rent, start_date, end_date, is_active';
 const BASE_TENANT_SELECT = 'id, name, email, phone, bed_id, rent_amount, prorated_rent, start_date, end_date';
@@ -102,6 +122,8 @@ export const Payments = () => {
   const [alerts, setAlerts] = useState<AdminAlertsData>({ unpaidTenants: [], expiringTenants: [] });
   const [pendingDeletePaymentId, setPendingDeletePaymentId] = useState<string | null>(null);
   const formCardRef = useRef<HTMLDivElement | null>(null);
+  const [allCharges, setAllCharges] = useState<{tenant_id: string; billing_month: string; amount: number; description: string}[]>([]);
+  const [waivedSet, setWaivedSet] = useState<Set<string>>(new Set());
 
   const [formData, setFormData] = useState({
     tenant_id: '',
@@ -109,6 +131,7 @@ export const Payments = () => {
     payment_date: new Date().toISOString().split('T')[0],
     billing_month: getCurrentBillingMonth(),
     status: 'paid' as 'paid' | 'pending',
+    is_balance_waived: false,
   });
 
   const attachTenantDisplayData = (
@@ -212,6 +235,19 @@ export const Payments = () => {
       (bedRows ?? []) as BedRecord[],
       (roomRows ?? []) as RoomRecord[],
     );
+    const tenantFileResult = await supabase
+      .from('tenants')
+      .select('id, photo_url')
+      .eq('property_id', selectedPropertyId);
+    if (!tenantFileResult.error) {
+      const fileMap = new Map(
+        ((tenantFileResult.data ?? []) as Array<{ id: string; photo_url?: string | null }>)
+          .map((row) => [row.id, row.photo_url ?? null]),
+      );
+      enhancedTenants.forEach((tenant) => {
+        tenant.photo_url = fileMap.get(tenant.id) ?? null;
+      });
+    }
 
     const propertyTenantIds = enhancedTenants.map((tenant) => tenant.id);
     if (propertyTenantIds.length > 0) {
@@ -246,33 +282,54 @@ export const Payments = () => {
     }
 
     const paidTotals = new Map<string, number>();
+    const waivedCycles = new Set<string>();
     paymentRows.forEach((payment) => {
       if (payment.status !== 'paid') return;
       const key = `${payment.tenant_id}:${payment.billing_month}`;
       paidTotals.set(key, (paidTotals.get(key) ?? 0) + Number(payment.amount));
+      if (payment.is_balance_waived) {
+        waivedCycles.add(key);
+      }
     });
+
+    const chargesTotals = new Map<string, number>();
+    const chargesArray: ChargeRecord[] = [];
+    if (propertyTenantIds.length > 0) {
+      const { data: charges } = await supabase
+        .from('tenant_charges')
+        .select(`tenant_id, billing_month, amount, expenses ( description )`)
+        .in('tenant_id', propertyTenantIds);
+      if (charges) {
+        chargesArray.push(...charges);
+        charges.forEach((charge) => {
+          const key = `${charge.tenant_id}:${charge.billing_month}`;
+          chargesTotals.set(key, (chargesTotals.get(key) ?? 0) + Number(charge.amount));
+        });
+      }
+    }
 
     const enhancedPaymentsWithStatus = paymentRows.map((payment) => {
       const tenant = enhancedTenants.find((item) => item.id === payment.tenant_id) ?? null;
-      const cycleDue = tenant
-        ? getRentDueForBillingMonth({
-          rentAmount: Number(tenant.rent_amount ?? 0),
-          proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
-          startDate: tenant.start_date,
-          billingMonth: payment.billing_month,
-        })
-        : 0;
-      const cyclePaid = paidTotals.get(`${payment.tenant_id}:${payment.billing_month}`) ?? 0;
-      const cycleStatus = getMonthlyPaymentStatus(cycleDue, cyclePaid);
+      const cycleSummary = tenant
+        ? calculateTenantBalanceForMonth(tenant, payment.billing_month, paymentRows, chargesArray)
+        : null;
 
       return {
         ...payment,
         tenant,
-        cycleDue,
-        cyclePaid,
-        cycleStatus,
+        cycleDue: cycleSummary?.dueAmount ?? 0,
+        cyclePaid: cycleSummary?.paidAmount ?? 0,
+        cycleStatus: cycleSummary?.status ?? 'unpaid',
       };
     });
+
+    setAllCharges(chargesArray.map((c) => ({ 
+      tenant_id: c.tenant_id, 
+      billing_month: c.billing_month, 
+      amount: Number(c.amount),
+      description: getChargeDescription(c) || 'Extra Charge'
+    })));
+    setWaivedSet(waivedCycles);
 
     setPaymentSchemaSupportsAudit(paymentAuditEnabled);
     setTenants(enhancedTenants);
@@ -292,6 +349,8 @@ export const Payments = () => {
     payment_date: string;
     status: 'paid' | 'pending';
     tenant: TenantSummary | null;
+    cycleDue?: number;
+    cyclePaid?: number;
   }): PaymentReceiptData => {
     const tenant = payment.tenant;
     const cyclePaid = payments
@@ -300,15 +359,12 @@ export const Payments = () => {
     const updatedCyclePaid = payment.status === 'paid'
       ? Math.max(cyclePaid, payment.amount)
       : cyclePaid;
-    const dueAmount = tenant
-      ? getRentDueForBillingMonth({
-        rentAmount: Number(tenant.rent_amount ?? 0),
-        proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
-        startDate: tenant.start_date,
-        billingMonth: payment.billing_month,
-      })
-      : 0;
-    const remainingAmount = Math.max(dueAmount - updatedCyclePaid, 0);
+    const cycleSummary = tenant
+      ? calculateTenantBalanceForMonth(tenant, payment.billing_month, payments, allCharges)
+      : null;
+    const dueAmount = payment.cycleDue ?? cycleSummary?.dueAmount ?? 0;
+    const isWaived = cycleSummary?.isBalanceWaived ?? (tenant ? waivedSet.has(`${tenant.id}:${payment.billing_month}`) : false);
+    const remainingAmount = isWaived ? 0 : Math.max(dueAmount - updatedCyclePaid, 0);
 
     return {
       receiptNumber: payment.id.slice(0, 8).toUpperCase(),
@@ -327,9 +383,13 @@ export const Payments = () => {
       dueAmount,
       paidAmount: updatedCyclePaid,
       remainingAmount,
-      paymentStatus: payment.status === 'paid' ? (remainingAmount > 0 ? 'Partial' : 'Paid') : 'Pending',
+      previousBalance: cycleSummary?.previousBalance ?? 0,
+      paymentStatus: payment.status === 'paid' ? getPaymentStatusLabel(getMonthlyPaymentStatus(dueAmount, updatedCyclePaid, isWaived)) : 'Pending',
+      extraCharges: tenant ? allCharges
+        .filter((c) => c.tenant_id === tenant.id && c.billing_month === payment.billing_month)
+        .map(c => ({ description: c.description, amount: c.amount })) : [],
     };
-  }, [payments, settings]);
+  }, [payments, settings, allCharges, waivedSet]);
 
   const openWhatsappShare = (receipt: PaymentReceiptData) => {
     window.open(getWhatsappShareLink(receipt), '_blank', 'noopener,noreferrer');
@@ -370,12 +430,13 @@ export const Payments = () => {
       return;
     }
 
-    const paymentPayload: Record<string, string | number | null> = {
+    const paymentPayload: Record<string, string | number | boolean | null> = {
       tenant_id: formData.tenant_id,
       amount: parsedAmount,
       payment_date: formData.payment_date,
       billing_month: formData.billing_month,
       status: formData.status,
+      is_balance_waived: formData.is_balance_waived,
     };
 
     if (paymentSchemaSupportsAudit) {
@@ -389,7 +450,11 @@ export const Payments = () => {
 
     if (error) {
       console.error('Payment insert error:', error);
-      setFormError(error.message || 'Unable to save payment record.');
+      if (isMissingColumnError(error)) {
+         setFormError('Please run the provided SQL migration script to add the is_balance_waived column.');
+      } else {
+         setFormError(error.message || 'Unable to save payment record.');
+      }
       return;
     }
 
@@ -414,22 +479,19 @@ export const Payments = () => {
       payment_date: new Date().toISOString().split('T')[0],
       billing_month: getCurrentBillingMonth(),
       status: 'paid',
+      is_balance_waived: false,
     });
   };
 
   const handleTenantSelect = (id: string) => {
     const tenant = tenants.find((item) => item.id === id);
+    if (!tenant) return;
+    const cycleSummary = calculateTenantBalanceForMonth(tenant, formData.billing_month, payments, allCharges);
+
     setFormData({
       ...formData,
       tenant_id: id,
-      amount: tenant
-        ? String(getRentDueForBillingMonth({
-          rentAmount: Number(tenant.rent_amount),
-          proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
-          startDate: tenant.start_date,
-          billingMonth: formData.billing_month,
-        }))
-        : '',
+      amount: String(cycleSummary.remainingAmount),
     });
     setFormError('');
   };
@@ -469,6 +531,7 @@ export const Payments = () => {
       payment_date: payment.payment_date,
       billing_month: payment.billing_month,
       status: payment.status,
+      is_balance_waived: payment.is_balance_waived || false,
     });
     window.requestAnimationFrame(() => {
       formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -502,6 +565,7 @@ export const Payments = () => {
         payment_date: new Date().toISOString().split('T')[0],
         billing_month: getCurrentBillingMonth(),
         status: 'paid',
+        is_balance_waived: false,
       });
     }
 
@@ -520,37 +584,25 @@ export const Payments = () => {
     ))
   ), [selectedMonthEnd, selectedMonthStart, tenants]);
 
-  const paymentTotalsForMonth = useMemo(() => {
-    const totals = new Map<string, number>();
-    payments
-      .filter((payment) => payment.status === 'paid' && payment.billing_month === selectedBillingMonth)
-      .forEach((payment) => {
-        totals.set(payment.tenant_id, (totals.get(payment.tenant_id) ?? 0) + Number(payment.amount));
-      });
-    return totals;
-  }, [payments, selectedBillingMonth]);
-
   const monthlyTenantStatuses = useMemo(() => {
     return activeTenantsForMonth.map((tenant) => {
-      const due = getRentDueForBillingMonth({
-        rentAmount: Number(tenant.rent_amount),
-        proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
-        startDate: tenant.start_date,
-        billingMonth: selectedBillingMonth,
-      });
-      const paid = paymentTotalsForMonth.get(tenant.id) ?? 0;
-      const remaining = Math.max(due - paid, 0);
-      const cycleStatus = getMonthlyPaymentStatus(due, paid);
+      const cycleSummary = calculateTenantBalanceForMonth(tenant, selectedBillingMonth, payments, allCharges);
+      const due = cycleSummary.dueAmount;
+      const paid = cycleSummary.paidAmount;
+      const remaining = cycleSummary.remainingAmount;
+      const cycleStatus = cycleSummary.status;
 
       return {
         ...tenant,
+        rentDue: cycleSummary.baseDue,
+        otherCharges: cycleSummary.extraCharges + cycleSummary.previousBalance,
         due,
         paid,
         remaining,
         cycleStatus,
       };
     });
-  }, [activeTenantsForMonth, paymentTotalsForMonth, selectedBillingMonth]);
+  }, [activeTenantsForMonth, selectedBillingMonth, payments, allCharges]);
 
   const filteredPayments = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
@@ -701,15 +753,35 @@ export const Payments = () => {
           </p>
         </div>
         <div className="admin-toolbar">
-          <Button variant="secondary" onClick={() => setShowFilters((value) => !value)}>
-            <Search size={16} /> {showFilters ? 'Hide Search' : 'Search & Filter'}
+          <div className="toolbar-month-field">
+            <Input
+              type="month"
+              value={monthFilter}
+              aria-label="Billing month"
+              title="Billing month"
+              onChange={(e) => setMonthFilter(e.target.value)}
+            />
+          </div>
+          <Button
+            variant="secondary"
+            onClick={() => setShowFilters((value) => !value)}
+            aria-label={showFilters ? 'Hide search and filters' : 'Show search and filters'}
+            title={showFilters ? 'Hide search and filters' : 'Show search and filters'}
+          >
+            <Search size={16} />
           </Button>
-          <Button variant="secondary" onClick={exportPaymentsCsv}>
+          <Button className="desktop-only" variant="secondary" onClick={exportPaymentsCsv}>
             <Download size={16} /> Export Payments
           </Button>
-          <Button variant="secondary" onClick={exportUnpaidCsv}>
+          <Button className="desktop-only" variant="secondary" onClick={exportUnpaidCsv}>
             <Download size={16} /> Export Unpaid
           </Button>
+          <MobileActionMenu
+            items={[
+              { label: 'Export Payments', onClick: exportPaymentsCsv },
+              { label: 'Export Unpaid', onClick: exportUnpaidCsv },
+            ]}
+          />
           <Button onClick={() => setShowForm(!showForm)}>
             {showForm ? 'Cancel' : 'Record Payment'}
           </Button>
@@ -726,12 +798,17 @@ export const Payments = () => {
       )}
 
       {(alerts.unpaidTenants.length > 0 || alerts.expiringTenants.length > 0) && (
-        <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)' }}>
-          <h3 style={{ marginBottom: '0.5rem' }}>Alerts</h3>
-          <p style={{ color: 'var(--text-secondary)' }}>
-            {alerts.unpaidTenants.length > 0 ? `${alerts.unpaidTenants.length} tenant(s) are unpaid or partial this month. ` : ''}
-            {alerts.expiringTenants.length > 0 ? `${alerts.expiringTenants.length} contract(s) expire within 7 days.` : ''}
-          </p>
+        <Card style={{ marginBottom: '1rem', borderColor: 'rgba(245, 158, 11, 0.35)', padding: '0.9rem 1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ color: 'var(--text-secondary)' }}>
+              {alerts.unpaidTenants.length > 0 ? `${alerts.unpaidTenants.length} unpaid or partial this month. ` : ''}
+              {alerts.expiringTenants.length > 0 ? `${alerts.expiringTenants.length} expiring within 7 days.` : ''}
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {alerts.unpaidTenants.length > 0 ? <span className="badge badge-danger">{alerts.unpaidTenants.length} Unpaid</span> : null}
+              {alerts.expiringTenants.length > 0 ? <span className="badge badge-warning">{alerts.expiringTenants.length} Expiring</span> : null}
+            </div>
+          </div>
         </Card>
       )}
 
@@ -763,7 +840,6 @@ export const Payments = () => {
           </div>
           <Button variant="secondary" onClick={() => {
             setSearchQuery('');
-            setMonthFilter(getMonthInputValue(new Date()));
             setCycleStatusFilter('all');
             setTenantFilter('all');
           }}>
@@ -777,13 +853,6 @@ export const Payments = () => {
             placeholder="Tenant, email, room, or bed"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-          />
-
-          <Input
-            type="month"
-            label="Billing Month"
-            value={monthFilter}
-            onChange={(e) => setMonthFilter(e.target.value)}
           />
 
           <div className="form-group">
@@ -853,18 +922,16 @@ export const Payments = () => {
               onChange={(e) => {
                 const nextBillingMonth = `${e.target.value}-01`;
                 const tenant = tenants.find((item) => item.id === formData.tenant_id);
-                setFormData({
-                  ...formData,
-                  billing_month: nextBillingMonth,
-                  amount: tenant
-                    ? String(getRentDueForBillingMonth({
-                      rentAmount: Number(tenant.rent_amount),
-                      proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
-                      startDate: tenant.start_date,
-                      billingMonth: nextBillingMonth,
-                    }))
-                    : formData.amount,
-                });
+                if (tenant) {
+                  const cycleSummary = calculateTenantBalanceForMonth(tenant, nextBillingMonth, payments, allCharges);
+                  setFormData({
+                    ...formData,
+                    billing_month: nextBillingMonth,
+                    amount: String(cycleSummary.remainingAmount),
+                  });
+                } else {
+                  setFormData({ ...formData, billing_month: nextBillingMonth });
+                }
               }}
             />
 
@@ -884,23 +951,34 @@ export const Payments = () => {
               </select>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <Button variant="primary" type="submit" style={{ height: '42px', marginBottom: '1rem' }}>
+            <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <input
+                  type="checkbox"
+                  id="waive_balance"
+                  checked={formData.is_balance_waived}
+                  onChange={(e) => setFormData({ ...formData, is_balance_waived: e.target.checked })}
+                  style={{ width: '1.2rem', height: '1.2rem', cursor: 'pointer' }}
+                />
+                <label htmlFor="waive_balance" style={{ cursor: 'pointer', margin: 0, fontWeight: 500 }}>
+                  Consider remaining balance as waived (mark as fully paid)
+                </label>
+              </div>
+
+              <Button variant="primary" type="submit" style={{ height: '42px' }}>
                 {editingPaymentId ? 'Update Payment' : 'Save Record'}
               </Button>
             </div>
           </form>
 
-          {selectedTenant && (
-            <div style={{ marginTop: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-              Selected booking: {selectedTenant.room?.name ?? 'Unknown room'} | Bed {selectedTenant.bed?.bed_number ?? 'Unknown'} | Due for {format(new Date(formData.billing_month), 'MMM yyyy')} {formatCurrency(getRentDueForBillingMonth({
-                rentAmount: Number(selectedTenant.rent_amount),
-                proratedRent: selectedTenant.prorated_rent != null ? Number(selectedTenant.prorated_rent) : null,
-                startDate: selectedTenant.start_date,
-                billingMonth: formData.billing_month,
-              }))}
-            </div>
-          )}
+          {selectedTenant && (() => {
+            const cycleSummary = calculateTenantBalanceForMonth(selectedTenant, formData.billing_month, payments, allCharges);
+            return (
+              <div style={{ marginTop: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                Selected booking: {selectedTenant.room?.name ?? 'Unknown room'} | Bed {selectedTenant.bed?.bed_number ?? 'Unknown'} | Remaining for {format(new Date(formData.billing_month), 'MMM yyyy')}: {formatCurrency(cycleSummary.remainingAmount)}
+              </div>
+            );
+          })()}
 
           {formError && (
             <div style={{ color: 'var(--danger)', fontSize: '0.875rem', marginTop: '0.75rem', padding: '0.75rem 1rem', background: 'var(--danger-bg)', borderRadius: 'var(--radius-sm)' }}>
@@ -922,17 +1000,37 @@ export const Payments = () => {
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(220px, 1.4fr) minmax(180px, 1.1fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(130px, 0.9fr) minmax(130px, 0.9fr)',
+              gap: '1rem',
+              padding: '0 0 0.5rem',
+              borderBottom: '1px solid var(--border-light)',
+              color: 'var(--text-secondary)',
+              fontSize: '0.8rem',
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+            }}>
+              <div>Tenant</div>
+              <div>Email</div>
+              <div>Rent</div>
+              <div>Other</div>
+              <div>Paid</div>
+              <div>Balance</div>
+              <div>Status</div>
+            </div>
             {monthlyTenantStatuses.filter((tenant) => tenant.remaining > 0).map((tenant) => (
-              <div key={tenant.id} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '1rem', padding: '0.9rem 0', borderBottom: '1px solid rgba(255,255,255,0.06)', alignItems: 'center' }}>
+              <div key={tenant.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1.4fr) minmax(180px, 1.1fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(130px, 0.9fr) minmax(130px, 0.9fr)', gap: '1rem', padding: '0.9rem 0', borderBottom: '1px solid rgba(255,255,255,0.06)', alignItems: 'center' }}>
                 <div>
                   <div style={{ fontWeight: 600 }}>{tenant.name}</div>
                   <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>{tenant.room?.name} | Bed {tenant.bed?.bed_number}</div>
                 </div>
                 <div style={{ color: 'var(--text-secondary)' }}>{tenant.email ?? 'No email saved'}</div>
-                <div>{formatCurrency(tenant.due)}</div>
+                <div>{formatCurrency(tenant.rentDue ?? 0)}</div>
+                <div>{formatCurrency(tenant.otherCharges ?? 0)}</div>
                 <div>{formatCurrency(tenant.paid)}</div>
-                <div style={{ justifySelf: 'end', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                  <span style={{ color: 'var(--warning)' }}>{formatCurrency(tenant.remaining)}</span>
+                <div style={{ color: 'var(--warning)', fontWeight: 600 }}>{formatCurrency(tenant.remaining)}</div>
+                <div style={{ justifySelf: 'end' }}>
                   <span className={`badge ${getPaymentStatusBadgeClass(tenant.cycleStatus)}`}>
                     {getPaymentStatusLabel(tenant.cycleStatus)}
                   </span>
@@ -957,9 +1055,14 @@ export const Payments = () => {
 
         {filteredPayments.map((payment) => (
           <div key={payment.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 1fr auto', padding: '1rem', borderBottom: '1px solid rgba(255,255,255,0.05)', alignItems: 'center', background: editingPaymentId === payment.id ? 'rgba(123, 97, 255, 0.08)' : payment.cycleStatus === 'unpaid' ? 'rgba(127, 29, 29, 0.12)' : payment.cycleStatus === 'partial' ? 'rgba(120, 53, 15, 0.12)' : undefined }}>
-            <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+              {payment.tenant?.photo_url ? (
+                <img src={payment.tenant.photo_url} alt={payment.tenant?.name} style={{ width: '28px', height: '28px', borderRadius: '999px', objectFit: 'cover' }} />
+              ) : null}
+              <div>
               <div style={{ fontWeight: 500 }}>{payment.tenant?.name}</div>
               <div style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>{payment.tenant?.email}</div>
+              </div>
             </div>
             <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
               {payment.tenant?.room?.name} | Bed {payment.tenant?.bed?.bed_number}

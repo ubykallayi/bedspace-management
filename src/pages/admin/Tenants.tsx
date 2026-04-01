@@ -5,6 +5,7 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Input } from '../../components/ui/Input';
+import { MobileActionMenu } from '../../components/ui/MobileActionMenu';
 import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -22,6 +23,7 @@ import {
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
 import { supabase } from '../../lib/supabase';
+import { uploadTenantAsset } from '../../lib/tenantFiles';
 
 type BedOption = {
   id: string;
@@ -52,6 +54,8 @@ type TenantRecord = {
   updated_at?: string | null;
   updated_by?: string | null;
   property_id?: string;
+  photo_url?: string | null;
+  document_url?: string | null;
   bed?: BedOption | null;
   room?: RoomRecord | null;
 };
@@ -70,6 +74,8 @@ type TenantFormState = {
   payment_date: string;
   payment_billing_month: string;
   payment_status: 'paid' | 'pending';
+  photo_url: string;
+  document_url: string;
 };
 
 type RawTenantRecord = Omit<TenantRecord, 'bed' | 'room'>;
@@ -88,6 +94,8 @@ const INITIAL_FORM_STATE: TenantFormState = {
   payment_date: new Date().toISOString().split('T')[0],
   payment_billing_month: getMonthStartKey(new Date()),
   payment_status: 'paid',
+  photo_url: '',
+  document_url: '',
 };
 
 const BASE_TENANT_SELECT = 'id, user_id, name, email, phone, bed_id, rent_amount, prorated_rent, start_date, end_date';
@@ -123,6 +131,8 @@ export const Tenants = () => {
     action: () => Promise<void>;
   }>(null);
   const [formData, setFormData] = useState<TenantFormState>(INITIAL_FORM_STATE);
+  const [tenantPhotoFile, setTenantPhotoFile] = useState<File | null>(null);
+  const [tenantDocumentFile, setTenantDocumentFile] = useState<File | null>(null);
   const formCardRef = useRef<HTMLDivElement | null>(null);
 
   const attachRoomAndBed = useCallback((tenantRows: RawTenantRecord[], bedRows: BedOption[], roomRows: RoomRecord[]) => (
@@ -203,6 +213,25 @@ export const Tenants = () => {
       }
     }
 
+    const filesResult = await supabase
+      .from('tenants')
+      .select('id, photo_url, document_url')
+      .eq('property_id', selectedPropertyId);
+    if (!filesResult.error) {
+      const filesById = new Map(
+        ((filesResult.data ?? []) as Array<{ id: string; photo_url?: string | null; document_url?: string | null }>)
+          .map((row) => [row.id, row]),
+      );
+      tenantRows = tenantRows.map((tenant) => {
+        const fileInfo = filesById.get(tenant.id);
+        return {
+          ...tenant,
+          photo_url: fileInfo?.photo_url ?? null,
+          document_url: fileInfo?.document_url ?? null,
+        };
+      });
+    }
+
     const [
       { data: bedsData, error: bedsError },
       { data: roomsData, error: roomsError },
@@ -266,6 +295,8 @@ export const Tenants = () => {
 
   const resetForm = () => {
     setFormData(INITIAL_FORM_STATE);
+    setTenantPhotoFile(null);
+    setTenantDocumentFile(null);
     setFormError('');
     setEditingTenantId(null);
     setShowForm(false);
@@ -491,6 +522,26 @@ export const Tenants = () => {
           .single();
 
       if (error) throw error;
+      const tenantId = savedTenant?.id ?? editingTenantId;
+      if (!tenantId) throw new Error('Unable to resolve tenant id for file upload.');
+
+      let nextPhotoUrl = formData.photo_url.trim() || null;
+      let nextDocumentUrl = formData.document_url.trim() || null;
+      if (tenantPhotoFile) {
+        nextPhotoUrl = await uploadTenantAsset({ tenantId, file: tenantPhotoFile, assetType: 'photo' });
+      }
+      if (tenantDocumentFile) {
+        nextDocumentUrl = await uploadTenantAsset({ tenantId, file: tenantDocumentFile, assetType: 'document' });
+      }
+      if (nextPhotoUrl !== existingTenant?.photo_url || nextDocumentUrl !== existingTenant?.document_url) {
+        await supabase
+          .from('tenants')
+          .update({
+            photo_url: nextPhotoUrl,
+            document_url: nextDocumentUrl,
+          })
+          .eq('id', tenantId);
+      }
 
       if (shouldCreateInitialPayment && savedTenant?.id) {
         const initialPaymentPayload: Record<string, string | number | null> = {
@@ -523,7 +574,7 @@ export const Tenants = () => {
       await writeActivityLog({
         action: editingTenantId ? 'tenant.updated' : 'tenant.created',
         entityType: 'tenant',
-        entityId: savedTenant?.id ?? editingTenantId ?? '',
+        entityId: tenantId,
         description: editingTenantId
           ? `Updated tenant ${formData.name.trim()} and booking details.`
           : `Created tenant ${formData.name.trim()} and assigned bed ${bookingPreparation.selectedBed.bed_number}.`,
@@ -555,7 +606,11 @@ export const Tenants = () => {
       payment_date: new Date().toISOString().split('T')[0],
       payment_billing_month: getMonthStartKey(new Date()),
       payment_status: 'paid',
+      photo_url: tenant.photo_url ?? '',
+      document_url: tenant.document_url ?? '',
     });
+    setTenantPhotoFile(null);
+    setTenantDocumentFile(null);
     window.requestAnimationFrame(() => {
       formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
@@ -734,12 +789,22 @@ export const Tenants = () => {
           </p>
         </div>
         <div className="admin-toolbar">
-          <Button variant="secondary" onClick={() => setShowFilters((value) => !value)}>
-            <Search size={16} /> {showFilters ? 'Hide Search' : 'Search & Filter'}
+          <Button
+            variant="secondary"
+            onClick={() => setShowFilters((value) => !value)}
+            aria-label={showFilters ? 'Hide search and filters' : 'Show search and filters'}
+            title={showFilters ? 'Hide search and filters' : 'Show search and filters'}
+          >
+            <Search size={16} />
           </Button>
-          <Button variant="secondary" onClick={exportTenantsCsv}>
+          <Button className="desktop-only" variant="secondary" onClick={exportTenantsCsv}>
             <Download size={16} /> Export CSV
           </Button>
+          <MobileActionMenu
+            items={[
+              { label: 'Export CSV', onClick: exportTenantsCsv },
+            ]}
+          />
           <Button
             onClick={() => {
               if (showForm) resetForm();
@@ -761,12 +826,17 @@ export const Tenants = () => {
       )}
 
       {(alerts.unpaidTenants.length > 0 || alerts.expiringTenants.length > 0) && (
-        <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)' }}>
-          <h3 style={{ marginBottom: '0.5rem' }}>Attention Needed</h3>
-          <p style={{ color: 'var(--text-secondary)' }}>
-            {alerts.unpaidTenants.length > 0 ? `${alerts.unpaidTenants.length} tenant(s) have unpaid or partial rent this month. ` : ''}
-            {alerts.expiringTenants.length > 0 ? `${alerts.expiringTenants.length} contract(s) expire within 7 days.` : ''}
-          </p>
+        <Card style={{ marginBottom: '1rem', borderColor: 'rgba(245, 158, 11, 0.35)', padding: '0.9rem 1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ color: 'var(--text-secondary)' }}>
+              {alerts.unpaidTenants.length > 0 ? `${alerts.unpaidTenants.length} unpaid or partial this month. ` : ''}
+              {alerts.expiringTenants.length > 0 ? `${alerts.expiringTenants.length} expiring within 7 days.` : ''}
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {alerts.unpaidTenants.length > 0 ? <span className="badge badge-danger">{alerts.unpaidTenants.length} Unpaid</span> : null}
+              {alerts.expiringTenants.length > 0 ? <span className="badge badge-warning">{alerts.expiringTenants.length} Expiring</span> : null}
+            </div>
+          </div>
         </Card>
       )}
 
@@ -844,9 +914,64 @@ export const Tenants = () => {
             )}
           </div>
           <form onSubmit={handleAddTenant} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-            <Input label="Full Name" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <div>
+                {(tenantPhotoFile || formData.photo_url) ? (
+                  <img
+                    src={tenantPhotoFile ? URL.createObjectURL(tenantPhotoFile) : formData.photo_url}
+                    alt={formData.name || 'Tenant photo'}
+                    style={{ width: '56px', height: '56px', borderRadius: '999px', objectFit: 'cover', border: '1px solid var(--border-light)' }}
+                  />
+                ) : (
+                  <div style={{
+                    width: '56px',
+                    height: '56px',
+                    borderRadius: '999px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'var(--primary-glow)',
+                    fontWeight: 600,
+                    fontSize: '0.9rem',
+                  }}>
+                    {(formData.name || 'TN').slice(0, 2).toUpperCase()}
+                  </div>
+                )}
+              </div>
+              <Input label="Full Name" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
+            </div>
             <Input label="Phone Number" required value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} />
             <Input label="Tenant Email" required value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} />
+            <Input
+              label="Photo URL (optional)"
+              value={formData.photo_url}
+              onChange={(e) => setFormData({ ...formData, photo_url: e.target.value })}
+              placeholder="https://..."
+            />
+            <Input
+              label="Document URL (optional)"
+              value={formData.document_url}
+              onChange={(e) => setFormData({ ...formData, document_url: e.target.value })}
+              placeholder="https://..."
+            />
+            <div className="form-group">
+              <label className="form-label">Upload Photo (optional)</label>
+              <input
+                className="form-input"
+                type="file"
+                accept="image/*"
+                onChange={(e) => setTenantPhotoFile(e.target.files?.[0] ?? null)}
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Upload Document (optional)</label>
+              <input
+                className="form-input"
+                type="file"
+                accept=".pdf,.jpg,.jpeg,.png,.webp"
+                onChange={(e) => setTenantDocumentFile(e.target.files?.[0] ?? null)}
+              />
+            </div>
 
             <div className="form-group">
               <label className="form-label">Assign Room & Bed</label>
@@ -1068,8 +1193,15 @@ export const Tenants = () => {
                   : undefined,
             }}>
               <div>
-                <h3 style={{ fontSize: '1.1rem', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  {tenant.name}
+              <h3 style={{ fontSize: '1.1rem', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+                {tenant.photo_url ? (
+                  <img src={tenant.photo_url} alt={tenant.name} style={{ width: '48px', height: '48px', borderRadius: '999px', objectFit: 'cover', border: '1px solid var(--border-light)' }} />
+                ) : (
+                  <span style={{ width: '48px', height: '48px', borderRadius: '999px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-glow)', fontSize: '0.85rem', fontWeight: 600 }}>
+                    {tenant.name.slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+                  <span>{tenant.name}</span>
                   <span className={`badge ${getBookingStatusBadgeClass(bookingStatus)}`}>
                     {getBookingStatusLabel(bookingStatus)}
                   </span>
@@ -1080,6 +1212,11 @@ export const Tenants = () => {
                   {tenant.room?.name ?? 'Room unavailable'} | Bed {tenant.bed?.bed_number ?? 'Unknown'} | {tenant.phone}
                 </p>
                 <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>{tenant.email}</p>
+                {tenant.document_url ? (
+                  <a href={tenant.document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.85rem' }}>
+                    View document
+                  </a>
+                ) : null}
               </div>
 
               <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap', marginLeft: 'auto' }}>

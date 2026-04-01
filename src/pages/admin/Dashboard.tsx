@@ -3,6 +3,7 @@ import { addDays, format, lastDayOfMonth, startOfMonth } from 'date-fns';
 import { BedDouble, CheckCircle2, DoorOpen, Download, XCircle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
+import { MobileActionMenu } from '../../components/ui/MobileActionMenu';
 import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import {
   downloadCsv,
@@ -13,6 +14,7 @@ import {
   getPaymentStatusLabel,
   isMissingColumnError,
   isMissingTableError,
+  calculatePreviousBalance,
 } from '../../lib/admin';
 import { getCachedAdminData, setCachedAdminData } from '../../lib/adminDataCache';
 import { supabase } from '../../lib/supabase';
@@ -35,12 +37,20 @@ type PaymentRecord = {
   amount: number | string;
   status: 'paid' | 'pending';
   billing_month: string;
+  is_balance_waived?: boolean;
+};
+
+type ChargeRecord = {
+  tenant_id: string;
+  amount: number | string;
+  billing_month: string;
 };
 
 type TenantSummary = {
   id: string;
   name: string;
   email?: string;
+  photo_url?: string | null;
   bed_id: string;
   rent_amount: number | string;
   prorated_rent?: number | string | null;
@@ -79,6 +89,7 @@ export const Dashboard = () => {
     id: string;
     name: string;
     email?: string;
+    photo_url?: string | null;
     roomName?: string;
     bedNumber?: string;
     due: number;
@@ -158,7 +169,7 @@ export const Dashboard = () => {
 
       const enhancedTenantsResult = await supabase
         .from('tenants')
-        .select('id, name, email, bed_id, rent_amount, prorated_rent, start_date, end_date, property_id')
+        .select('id, name, email, photo_url, bed_id, rent_amount, prorated_rent, start_date, end_date, property_id')
         .eq('property_id', selectedPropertyId);
 
       if (roomsCountError) throw roomsCountError;
@@ -171,7 +182,7 @@ export const Dashboard = () => {
         if (isMissingColumnError(enhancedTenantsResult.error)) {
           const fallbackTenantsResult = await supabase
             .from('tenants')
-            .select('id, name, email, bed_id, rent_amount, start_date, end_date, property_id')
+            .select('id, name, email, photo_url, bed_id, rent_amount, start_date, end_date, property_id')
             .eq('property_id', selectedPropertyId);
 
           if (fallbackTenantsResult.error) throw fallbackTenantsResult.error;
@@ -196,7 +207,7 @@ export const Dashboard = () => {
       const totalBeds = safeBeds.length;
       const tenantIds = safeTenants.map((tenant) => tenant.id);
       const paymentsResult = tenantIds.length > 0
-        ? await supabase.from('payments').select('tenant_id, amount, status, billing_month').in('tenant_id', tenantIds)
+        ? await supabase.from('payments').select('tenant_id, amount, status, billing_month, is_balance_waived').in('tenant_id', tenantIds)
         : { data: [] as PaymentRecord[], error: null };
 
       if (paymentsResult.error) throw paymentsResult.error;
@@ -209,25 +220,42 @@ export const Dashboard = () => {
 
       const paymentsForMonth = safePayments.filter((payment) => payment.status === 'paid' && payment.billing_month === billingMonth);
       const paidTotals = new Map<string, number>();
+      const waivedSet = new Set<string>();
       paymentsForMonth.forEach((payment) => {
         paidTotals.set(payment.tenant_id, (paidTotals.get(payment.tenant_id) ?? 0) + Number(payment.amount));
+        if (payment.is_balance_waived) waivedSet.add(payment.tenant_id);
       });
+
+      const chargesResult = tenantIds.length > 0
+        ? await supabase.from('tenant_charges').select('tenant_id, amount, billing_month').in('tenant_id', tenantIds)
+        : { data: [] as ChargeRecord[], error: null };
+      const chargeTotals = new Map<string, number>();
+      (chargesResult.data ?? [])
+        .filter((c) => c.billing_month === billingMonth)
+        .forEach((charge) => {
+          chargeTotals.set(charge.tenant_id, (chargeTotals.get(charge.tenant_id) ?? 0) + Number(charge.amount));
+        });
 
       const unpaid = currentMonthTenants.map((tenant) => {
         const paid = paidTotals.get(tenant.id) ?? 0;
-        const due = getRentDueForBillingMonth({
+        const extraCharges = chargeTotals.get(tenant.id) ?? 0;
+        const baseDue = getRentDueForBillingMonth({
           rentAmount: Number(tenant.rent_amount),
           proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
           startDate: tenant.start_date,
           billingMonth,
         });
-        const remaining = Math.max(due - paid, 0);
-        const status = getMonthlyPaymentStatus(due, paid);
+        const previousBalance = calculatePreviousBalance(tenant, billingMonth, safePayments, chargesResult.data ?? []);
+        const due = baseDue + extraCharges + previousBalance;
+        const isWaived = waivedSet.has(tenant.id);
+        const remaining = isWaived ? 0 : Math.max(due - paid, 0);
+        const status = getMonthlyPaymentStatus(due, paid, isWaived);
 
         return {
           id: tenant.id,
           name: tenant.name,
           email: tenant.email,
+          photo_url: tenant.photo_url ?? null,
           roomName: tenant.room?.name,
           bedNumber: tenant.bed?.bed_number,
           due,
@@ -275,12 +303,15 @@ export const Dashboard = () => {
         .filter((expense) => expense.expense_date >= billingMonth && expense.expense_date <= format(currentMonthEnd, 'yyyy-MM-dd'))
         .reduce((sum, expense) => sum + Number(expense.amount), 0);
       const monthlyNetProfit = revenue - monthlyExpenses;
-      const expected = currentMonthTenants.reduce((sum, tenant) => sum + getRentDueForBillingMonth({
-        rentAmount: Number(tenant.rent_amount),
-        proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
-        startDate: tenant.start_date,
-        billingMonth,
-      }), 0);
+      const expected = currentMonthTenants.reduce((sum, tenant) => {
+        const extraCharges = chargeTotals.get(tenant.id) ?? 0;
+        return sum + getRentDueForBillingMonth({
+          rentAmount: Number(tenant.rent_amount),
+          proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+          startDate: tenant.start_date,
+          billingMonth,
+        }) + extraCharges;
+      }, 0);
       const remaining = unpaid.reduce((sum, tenant) => sum + tenant.remaining, 0);
 
       setStats({
@@ -435,16 +466,23 @@ export const Dashboard = () => {
             Monthly occupancy, collections, and follow-up items for {selectedProperty?.name ?? 'the selected property'}.
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-          <Button variant="secondary" onClick={exportCollectionsCsv}>
+        <div className="admin-toolbar">
+          <Button className="desktop-only" variant="secondary" onClick={exportCollectionsCsv}>
             <Download size={16} /> Collections CSV
           </Button>
-          <Button variant="secondary" onClick={exportUnpaidCsv}>
+          <Button className="desktop-only" variant="secondary" onClick={exportUnpaidCsv}>
             <Download size={16} /> Unpaid CSV
           </Button>
-          <Button variant="secondary" onClick={exportOccupancyCsv}>
+          <Button className="desktop-only" variant="secondary" onClick={exportOccupancyCsv}>
             <Download size={16} /> Occupancy CSV
           </Button>
+          <MobileActionMenu
+            items={[
+              { label: 'Collections CSV', onClick: exportCollectionsCsv },
+              { label: 'Unpaid CSV', onClick: exportUnpaidCsv },
+              { label: 'Occupancy CSV', onClick: exportOccupancyCsv },
+            ]}
+          />
         </div>
       </div>
 
@@ -530,32 +568,15 @@ export const Dashboard = () => {
       </div>
 
       {(unpaidTenants.length > 0 || expiringTenants.length > 0) && (
-        <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)' }}>
-          <h2 style={{ marginBottom: '1rem' }}>Alerts</h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
-            <div>
-              <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Unpaid Rent</div>
-              {unpaidTenants.length === 0 ? (
-                <div style={{ color: 'var(--text-secondary)' }}>No unpaid tenants this month.</div>
-              ) : (
-                unpaidTenants.slice(0, 4).map((tenant) => (
-                  <div key={tenant.id} style={{ color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
-                    {tenant.name} | {tenant.roomName} | Bed {tenant.bedNumber}
-                  </div>
-                ))
-              )}
+        <Card style={{ marginBottom: '1rem', borderColor: 'rgba(245, 158, 11, 0.35)', padding: '0.9rem 1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ color: 'var(--text-secondary)' }}>
+              {unpaidTenants.length > 0 ? `${unpaidTenants.length} unpaid or partial this month. ` : ''}
+              {expiringTenants.length > 0 ? `${expiringTenants.length} expiring within 7 days.` : ''}
             </div>
-            <div>
-              <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Expiring Within 7 Days</div>
-              {expiringTenants.length === 0 ? (
-                <div style={{ color: 'var(--text-secondary)' }}>No contracts expiring soon.</div>
-              ) : (
-                expiringTenants.slice(0, 4).map((tenant) => (
-                  <div key={tenant.id} style={{ color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
-                    {tenant.name} | {tenant.roomName} | Bed {tenant.bedNumber} | {tenant.daysToExpiry} day(s)
-                  </div>
-                ))
-              )}
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {unpaidTenants.length > 0 ? <span className="badge badge-danger">{unpaidTenants.length} Unpaid</span> : null}
+              {expiringTenants.length > 0 ? <span className="badge badge-warning">{expiringTenants.length} Expiring</span> : null}
             </div>
           </div>
         </Card>
@@ -571,9 +592,14 @@ export const Dashboard = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
             {unpaidTenants.map((tenant) => (
               <div key={tenant.id} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '1rem', padding: '0.9rem 0', borderBottom: '1px solid rgba(255,255,255,0.06)', alignItems: 'center' }}>
-                <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                  {tenant.photo_url ? (
+                    <img src={tenant.photo_url} alt={tenant.name} style={{ width: '24px', height: '24px', borderRadius: '999px', objectFit: 'cover' }} />
+                  ) : null}
+                  <div>
                   <div style={{ fontWeight: 600 }}>{tenant.name}</div>
                   <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>{tenant.email ?? 'No email saved'}</div>
+                  </div>
                 </div>
                 <div style={{ color: 'var(--text-secondary)' }}>{tenant.roomName} | Bed {tenant.bedNumber}</div>
                 <div>Due {formatCurrency(tenant.due)}</div>

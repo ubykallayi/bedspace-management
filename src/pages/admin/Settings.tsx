@@ -402,7 +402,7 @@ export const Settings = () => {
     <div className="page-container animate-fade-in">
       <div className="page-header">
         <div>
-          <h1 className="page-title">Settings</h1>
+          <h1 className="page-title">Application settings</h1>
         </div>
       </div>
 

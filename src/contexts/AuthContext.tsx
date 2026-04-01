@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { User } from '@supabase/supabase-js';
 import { AppRole } from '../lib/rbac';
 import { supabase } from '../lib/supabase';
@@ -24,6 +24,121 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     isLoading: true,
     error: null,
   });
+
+  const getTenantActivationState = useCallback(async (user: User) => {
+    const tenantRows: Array<{ id: string; is_active?: boolean | null; end_date?: string | null }> = [];
+    const tenantQueries = [
+      supabase
+        .from('tenants')
+        .select('id, is_active, end_date')
+        .eq('user_id', user.id),
+      user.email
+        ? supabase
+          .from('tenants')
+          .select('id, is_active, end_date')
+          .eq('email', user.email.toLowerCase())
+        : null,
+    ].filter(Boolean);
+
+    for (const tenantQuery of tenantQueries) {
+      const response = await tenantQuery;
+      if (!response) return { blocked: true };
+      const { data, error } = response;
+
+      if (error) {
+        if (error.code === '42703' || error.code === '42P01') {
+          // If the tenants table/columns are not ready yet, fail closed for tenant access.
+          return { blocked: true };
+        }
+        throw error;
+      }
+
+      tenantRows.push(...((data ?? []) as Array<{ id: string; is_active?: boolean | null; end_date?: string | null }>));
+    }
+
+    const uniqueTenantRows = tenantRows.filter((tenant, index, rows) => (
+      rows.findIndex((item) => item.id === tenant.id) === index
+    ));
+
+    if (uniqueTenantRows.length === 0) {
+      // No tenant booking rows found – treat as not allowed to access tenant portal.
+      return { blocked: true };
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    return {
+      blocked: !uniqueTenantRows.some((tenant) => {
+        const isManuallyActive = tenant.is_active !== false;
+        const isNotExpired = !tenant.end_date || new Date(tenant.end_date) >= today;
+        return isManuallyActive && isNotExpired;
+      }),
+    };
+  }, []);
+
+  const fetchUserRole = useCallback(async (user: User) => {
+    try {
+      let { data, error } = await supabase
+        .from('users')
+        .select('role, is_active')
+        .eq('id', user.id)
+        .single();
+
+      if (error?.code === '42703') {
+        const fallbackResponse = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', user.id)
+          .single();
+        data = fallbackResponse.data ? { ...fallbackResponse.data, is_active: true } : null;
+        error = fallbackResponse.error;
+      }
+
+      if (error) throw error;
+
+      if (data?.is_active === false) {
+        await supabase.auth.signOut();
+        setState({
+          user: null,
+          role: null,
+          isLoading: false,
+          error: 'Account inactive',
+        });
+        return;
+      }
+
+      if (data?.role === 'tenant') {
+        const tenantActivation = await getTenantActivationState(user);
+        if (tenantActivation.blocked) {
+          await supabase.auth.signOut();
+          setState({
+            user: null,
+            role: null,
+            isLoading: false,
+            error: 'Your tenant portal access is not active for any booking. Please contact an admin.',
+          });
+          return;
+        }
+      }
+      
+      setState({
+        user,
+        role: data?.role as AppRole,
+        isLoading: false,
+        error: null,
+      });
+    } catch (err) {
+      console.error('Error fetching user role:', err);
+      await supabase.auth.signOut();
+      setState({
+        user: null,
+        role: null,
+        isLoading: false,
+        error: 'Your account is signed in, but no valid role is configured yet. Please contact an admin.',
+      });
+    }
+  }, [getTenantActivationState]);
 
   useEffect(() => {
     const fetchSession = async () => {
@@ -56,123 +171,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     return () => {
       subscription?.unsubscribe();
     };
-  }, []);
-
-  const getTenantActivationState = async (user: User) => {
-    const tenantRows: Array<{ id: string; is_active?: boolean | null; end_date?: string | null }> = [];
-    const tenantQueries = [
-      supabase
-        .from('tenants')
-        .select('id, is_active, end_date')
-        .eq('user_id', user.id),
-      user.email
-        ? supabase
-          .from('tenants')
-          .select('id, is_active, end_date')
-          .eq('email', user.email.toLowerCase())
-        : null,
-    ].filter(Boolean);
-
-    for (const tenantQuery of tenantQueries) {
-      //const { data, error } = await tenantQuery;
-      const response = await tenantQuery;
-
-if (!response) return;
-
-const { data, error } = response;
-
-      if (error) {
-        if (error.code === '42703' || error.code === '42P01') {
-          return { blocked: false };
-        }
-        throw error;
-      }
-
-      tenantRows.push(...((data ?? []) as Array<{ id: string; is_active?: boolean | null; end_date?: string | null }>));
-    }
-
-    const uniqueTenantRows = tenantRows.filter((tenant, index, rows) => (
-      rows.findIndex((item) => item.id === tenant.id) === index
-    ));
-
-    if (uniqueTenantRows.length === 0) {
-      return { blocked: false };
-    }
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    return {
-      blocked: !uniqueTenantRows.some((tenant) => {
-        const isManuallyActive = tenant.is_active !== false;
-        const isNotExpired = !tenant.end_date || new Date(tenant.end_date) >= today;
-        return isManuallyActive && isNotExpired;
-      }),
-    };
-  };
-
-  const fetchUserRole = async (user: User) => {
-    try {
-      let { data, error } = await supabase
-        .from('users')
-        .select('role, is_active')
-        .eq('id', user.id)
-        .single();
-
-      if (error?.code === '42703') {
-        const fallbackResponse = await supabase
-          .from('users')
-          .select('role')
-          .eq('id', user.id)
-          .single();
-        data = fallbackResponse.data ? { ...fallbackResponse.data, is_active: true } : null;
-        error = fallbackResponse.error;
-      }
-
-      if (error) throw error;
-
-      if (data?.is_active === false) {
-        await supabase.auth.signOut();
-        setState({
-          user: null,
-          role: null,
-          isLoading: false,
-          error: 'Account inactive',
-        });
-        return;
-      }
-
-      if (data?.role === 'tenant') {
-        const tenantActivation = await getTenantActivationState(user) ?? { blocked: false };
-        if (tenantActivation.blocked) {
-          await supabase.auth.signOut();
-          setState({
-            user: null,
-            role: null,
-            isLoading: false,
-            error: 'Account inactive',
-          });
-          return;
-        }
-      }
-      
-      setState({
-        user,
-        role: data?.role as AppRole,
-        isLoading: false,
-        error: null,
-      });
-    } catch (err) {
-      console.error('Error fetching user role:', err);
-      await supabase.auth.signOut();
-      setState({
-        user: null,
-        role: null,
-        isLoading: false,
-        error: 'Your account is signed in, but no valid role is configured yet. Please contact an admin.',
-      });
-    }
-  };
+  }, [fetchUserRole]);
 
   return (
     <AuthContext.Provider value={state}>

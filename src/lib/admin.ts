@@ -77,6 +77,97 @@ export const getRentDueForBillingMonth = ({
   return calculateProratedRent(normalizedRent, startDate);
 };
 
+export const calculatePreviousBalance = (
+  tenant: { rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; id: string },
+  targetBillingMonth: string,
+  allPayments: { tenant_id: string; billing_month: string; amount: number | string; status: string; is_balance_waived?: boolean }[],
+  allCharges: { tenant_id: string; billing_month: string; amount: number | string }[]
+): number => {
+  let totalPreviousBalance = 0;
+
+  const getMonthIndex = (monthKey: string) => {
+    const [year, month] = monthKey.split('-').map(Number);
+    return year * 12 + (month - 1);
+  };
+
+  const getMonthKeyFromIndex = (monthIndex: number) => {
+    const year = Math.floor(monthIndex / 12);
+    const month = (monthIndex % 12) + 1;
+    return `${year}-${String(month).padStart(2, '0')}-01`;
+  };
+
+  const startMonthIndex = getMonthIndex(getMonthStartKey(tenant.start_date));
+  const targetMonthIndex = getMonthIndex(getMonthStartKey(targetBillingMonth));
+
+  for (let currentMonthIndex = startMonthIndex; currentMonthIndex < targetMonthIndex; currentMonthIndex += 1) {
+    const currentMonthKey = getMonthKeyFromIndex(currentMonthIndex);
+    
+    const baseDue = getRentDueForBillingMonth({
+      rentAmount: Number(tenant.rent_amount),
+      proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+      startDate: tenant.start_date,
+      billingMonth: currentMonthKey,
+    });
+    
+    const extraCharges = allCharges
+      .filter((c) => c.tenant_id === tenant.id && c.billing_month === currentMonthKey)
+      .reduce((sum, c) => sum + Number(c.amount), 0);
+      
+    const due = baseDue + extraCharges;
+    
+    const monthPayments = allPayments.filter((p) => p.tenant_id === tenant.id && p.billing_month === currentMonthKey && p.status === 'paid');
+    const paid = monthPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+    const isWaived = monthPayments.some((p) => p.is_balance_waived);
+    
+    if (!isWaived) {
+      const remaining = Math.max(due - paid, 0); // Ignore overpayments
+      totalPreviousBalance += remaining;
+    }
+  }
+
+  return Math.round(totalPreviousBalance * 100) / 100;
+};
+
+export const calculateTenantBalanceForMonth = (
+  tenant: { rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; id: string },
+  targetBillingMonth: string,
+  allPayments: { tenant_id: string; billing_month: string; amount: number | string; status: string; is_balance_waived?: boolean }[],
+  allCharges: { tenant_id: string; billing_month: string; amount: number | string }[],
+) => {
+  const baseDue = getRentDueForBillingMonth({
+    rentAmount: Number(tenant.rent_amount),
+    proratedRent: tenant.prorated_rent != null ? Number(tenant.prorated_rent) : null,
+    startDate: tenant.start_date,
+    billingMonth: targetBillingMonth,
+  });
+
+  const extraCharges = allCharges
+    .filter((charge) => charge.tenant_id === tenant.id && charge.billing_month === targetBillingMonth)
+    .reduce((sum, charge) => sum + Number(charge.amount), 0);
+
+  const previousBalance = calculatePreviousBalance(tenant, targetBillingMonth, allPayments, allCharges);
+  const monthPayments = allPayments.filter((payment) => (
+    payment.tenant_id === tenant.id &&
+    payment.billing_month === targetBillingMonth &&
+    payment.status === 'paid'
+  ));
+  const paidAmount = monthPayments.reduce((sum, payment) => sum + Number(payment.amount), 0);
+  const isBalanceWaived = monthPayments.some((payment) => payment.is_balance_waived);
+  const dueAmount = Math.round((baseDue + extraCharges + previousBalance) * 100) / 100;
+  const remainingAmount = isBalanceWaived ? 0 : Math.max(dueAmount - paidAmount, 0);
+
+  return {
+    baseDue,
+    extraCharges,
+    previousBalance,
+    dueAmount,
+    paidAmount,
+    remainingAmount,
+    isBalanceWaived,
+    status: getMonthlyPaymentStatus(dueAmount, paidAmount, isBalanceWaived),
+  };
+};
+
 export const isMissingColumnError = (error: unknown) => {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === '42703';
 };
@@ -112,7 +203,8 @@ export const getBookingStatusLabel = (status: BookingLifecycleStatus) => {
   return 'Inactive';
 };
 
-export const getMonthlyPaymentStatus = (due: number, paid: number): MonthlyPaymentStatus => {
+export const getMonthlyPaymentStatus = (due: number, paid: number, isBalanceWaived?: boolean): MonthlyPaymentStatus => {
+  if (isBalanceWaived) return 'paid';
   if (paid >= due && due > 0) return 'paid';
   if (paid > 0) return 'partial';
   return 'unpaid';

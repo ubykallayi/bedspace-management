@@ -15,7 +15,6 @@ export const Login = () => {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [isRegister, setIsRegister] = useState(false);
   const navigate = useNavigate();
 
   const handleAuth = async (e: React.FormEvent) => {
@@ -24,33 +23,13 @@ export const Login = () => {
     setError('');
 
     try {
-      if (isRegister) {
-        const { data, error: signUpError } = await supabase.auth.signUp({
-          email,
-          password,
-        });
-        if (signUpError) throw signUpError;
-        
-        // As a fallback for demo: In a real app we'd let a trigger create the user in the public.users table.
-        // For simplicity if standard signup, we can insert the user here if no RLS prevents it.
-        if (data.user) {
-          await supabase.from('users').insert([{
-            id: data.user.id,
-            role: 'tenant',
-            email,
-          }]);
-          alert('Registration successful! Please log in.');
-          setIsRegister(false);
-        }
-      } else {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-        if (signInError) throw signInError;
-        // Navigation handles redirect automatically because of AuthContext changes
-        navigate('/');
-      }
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (signInError) throw signInError;
+      // Navigation handles redirect automatically because of AuthContext changes
+      navigate('/');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'An error occurred during authentication.');
     } finally {
@@ -71,7 +50,7 @@ export const Login = () => {
           <DoorOpen size={48} color="var(--primary)" style={{ margin: '0 auto' }} />
           <h1 style={{ marginTop: '1rem', marginBottom: '0.5rem' }}>{settings.site_name}</h1>
           <p style={{ color: 'var(--text-secondary)' }}>
-            Log in to continue. New tenant accounts can sign up here, while staff access is created by a super admin.
+            Log in to continue. Tenant and staff accounts are created and activated by an administrator.
           </p>
         </div>
 
@@ -101,21 +80,8 @@ export const Login = () => {
             )}
 
             <Button type="submit" variant="primary" style={{ width: '100%', marginBottom: '1rem' }} isLoading={loading}>
-              {isRegister ? 'Sign Up' : 'Log In'}
+              Log In
             </Button>
-
-            <div style={{ textAlign: 'center', fontSize: '0.875rem' }}>
-              <span style={{ color: 'var(--text-secondary)' }}>
-                {isRegister ? "Already have an account?" : "Don't have an account?"}
-              </span>{' '}
-              <button 
-                type="button" 
-                onClick={() => setIsRegister(!isRegister)}
-                style={{ color: 'var(--primary)', fontWeight: 500 }}
-              >
-                {isRegister ? 'Log In' : 'Create Tenant Account'}
-              </button>
-            </div>
           </form>
         </Card>
       </div>

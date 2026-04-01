@@ -5,6 +5,7 @@ import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
 import { Input } from '../../components/ui/Input';
+import { MobileActionMenu } from '../../components/ui/MobileActionMenu';
 import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { formatCurrency, writeActivityLog } from '../../lib/admin';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
@@ -29,10 +30,16 @@ type BedRecord = {
 type TenantBooking = {
   id: string;
   name: string;
+  photo_url?: string | null;
   bed_id: string;
   start_date: string;
   end_date: string | null;
   property_id?: string;
+};
+
+type TenantPayment = {
+  tenant_id: string;
+  payment_date: string;
 };
 
 type PendingAction = {
@@ -55,6 +62,7 @@ export const Rooms = () => {
   const [rooms, setRooms] = useState<RoomRecord[]>([]);
   const [beds, setBeds] = useState<BedRecord[]>([]);
   const [tenantBookings, setTenantBookings] = useState<TenantBooking[]>([]);
+  const [tenantPayments, setTenantPayments] = useState<TenantPayment[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
   const [showRoomForm, setShowRoomForm] = useState(false);
@@ -75,6 +83,7 @@ export const Rooms = () => {
       setRooms([]);
       setBeds([]);
       setTenantBookings([]);
+      setTenantPayments([]);
       setLoading(false);
       setFetchError('');
       return;
@@ -85,12 +94,14 @@ export const Rooms = () => {
       rooms: RoomRecord[];
       beds: BedRecord[];
       tenantBookings: TenantBooking[];
+      tenantPayments: TenantPayment[];
     }>(cacheKey);
 
     if (cached) {
       setRooms(cached.rooms);
       setBeds(cached.beds);
       setTenantBookings(cached.tenantBookings);
+      setTenantPayments(cached.tenantPayments ?? []);
       setSelectedRoomId((current) => current ?? cached.rooms[0]?.id ?? null);
       setLoading(false);
     } else {
@@ -106,7 +117,7 @@ export const Rooms = () => {
     ] = await Promise.all([
       supabase.from('rooms').select('id, name, property_id').eq('property_id', selectedPropertyId).order('name'),
       supabase.from('beds').select('id, room_id, bed_number, status, rent, property_id').eq('property_id', selectedPropertyId).order('bed_number'),
-      supabase.from('tenants').select('id, name, bed_id, start_date, end_date, property_id').eq('property_id', selectedPropertyId).order('start_date', { ascending: false }),
+      supabase.from('tenants').select('id, name, photo_url, bed_id, start_date, end_date, property_id').eq('property_id', selectedPropertyId).order('start_date', { ascending: false }),
     ]);
 
     if (roomsError || bedsError || tenantsError) {
@@ -119,10 +130,27 @@ export const Rooms = () => {
     const safeRooms = (roomRows ?? []) as RoomRecord[];
     const safeBeds = (bedRows ?? []) as BedRecord[];
     const safeTenantBookings = (tenantRows ?? []) as TenantBooking[];
+    let safeTenantPayments: TenantPayment[] = [];
+
+    const tenantIds = safeTenantBookings.map((tenant) => tenant.id);
+    if (tenantIds.length > 0) {
+      const { data: paymentRows, error: paymentsError } = await supabase
+        .from('payments')
+        .select('tenant_id, payment_date')
+        .in('tenant_id', tenantIds)
+        .order('payment_date', { ascending: false });
+      if (paymentsError) {
+        setFetchError(paymentsError.message || 'Unable to load payment history.');
+        setLoading(false);
+        return;
+      }
+      safeTenantPayments = (paymentRows ?? []) as TenantPayment[];
+    }
 
     setRooms(safeRooms);
     setBeds(safeBeds);
     setTenantBookings(safeTenantBookings);
+    setTenantPayments(safeTenantPayments);
     setSelectedRoomId((current) => (
       current && safeRooms.some((room) => room.id === current)
         ? current
@@ -132,6 +160,7 @@ export const Rooms = () => {
       rooms: safeRooms,
       beds: safeBeds,
       tenantBookings: safeTenantBookings,
+      tenantPayments: safeTenantPayments,
     });
     setLoading(false);
   }, [selectedPropertyId]);
@@ -188,6 +217,13 @@ export const Rooms = () => {
 
   const bedRows = useMemo(() => {
     const todayKey = format(new Date(), 'yyyy-MM-dd');
+    const latestPaymentByTenantId = new Map<string, string>();
+    tenantPayments.forEach((payment) => {
+      const existing = latestPaymentByTenantId.get(payment.tenant_id);
+      if (!existing || payment.payment_date > existing) {
+        latestPaymentByTenantId.set(payment.tenant_id, payment.payment_date);
+      }
+    });
 
     return beds.map((bed) => {
       const room = rooms.find((item) => item.id === bed.room_id) ?? null;
@@ -205,13 +241,14 @@ export const Rooms = () => {
         room,
         currentTenant,
         nextBooking,
+        lastPaymentDate: currentTenant ? (latestPaymentByTenantId.get(currentTenant.id) ?? null) : null,
       };
     }).sort((left, right) => {
       const roomCompare = (left.room?.name ?? '').localeCompare(right.room?.name ?? '');
       if (roomCompare !== 0) return roomCompare;
       return left.bed_number.localeCompare(right.bed_number, undefined, { numeric: true, sensitivity: 'base' });
     });
-  }, [beds, rooms, tenantBookings]);
+  }, [beds, rooms, tenantBookings, tenantPayments]);
 
   const summary = useMemo(() => {
     const occupied = beds.filter((bed) => bed.status === 'occupied').length;
@@ -472,6 +509,7 @@ export const Rooms = () => {
         </div>
         <div className="admin-toolbar">
           <Button
+            className="desktop-only"
             variant={showRoomForm ? 'secondary' : 'primary'}
             onClick={() => {
               setShowRoomForm((current) => !current);
@@ -495,6 +533,17 @@ export const Rooms = () => {
             <Plus size={16} />
             {showBedForm ? 'Close Bed Form' : 'Add Bed'}
           </Button>
+          <MobileActionMenu
+            items={[
+              {
+                label: showRoomForm ? 'Close Room Form' : 'Add Room',
+                onClick: () => {
+                  setShowRoomForm((current) => !current);
+                  if (showRoomForm) resetRoomForm();
+                },
+              },
+            ]}
+          />
         </div>
       </div>
 
@@ -508,13 +557,12 @@ export const Rooms = () => {
       ) : null}
 
       {(alerts.unpaidTenants.length > 0 || alerts.expiringTenants.length > 0) ? (
-        <Card style={{ marginBottom: '1.5rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
-            <div>
-              <h3 style={{ marginBottom: '0.35rem' }}>Attention Needed</h3>
-              <p style={{ color: 'var(--text-secondary)' }}>Highlighted bookings also appear inside the bed list below.</p>
+        <Card style={{ marginBottom: '1rem', padding: '0.9rem 1rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ color: 'var(--text-secondary)' }}>
+              Highlighted bookings appear in the bed list below.
             </div>
-            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <span className="badge badge-danger">{alerts.unpaidTenants.length} Unpaid</span>
               <span className="badge badge-warning">{alerts.expiringTenants.length} Expiring Soon</span>
             </div>
@@ -761,7 +809,13 @@ export const Rooms = () => {
                     </div>
                     <div style={{ display: 'grid', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
                       <div>Rent: <span style={{ color: 'var(--text-primary)' }}>{formatCurrency(Number(bed.rent ?? 0))}</span></div>
-                      <div>Current: <span style={{ color: 'var(--text-primary)' }}>{row?.currentTenant?.name ?? 'Vacant'}</span></div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        Current:
+                        {row?.currentTenant?.photo_url ? (
+                          <img src={row.currentTenant.photo_url} alt={row.currentTenant.name} style={{ width: '22px', height: '22px', borderRadius: '999px', objectFit: 'cover' }} />
+                        ) : null}
+                        <span style={{ color: 'var(--text-primary)' }}>{row?.currentTenant?.name ?? 'Vacant'}</span>
+                      </div>
                       <div>Upcoming: <span style={{ color: 'var(--text-primary)' }}>{row?.nextBooking ? renderBookingText(row.nextBooking) : 'None'}</span></div>
                     </div>
                   </div>
@@ -786,7 +840,7 @@ export const Rooms = () => {
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <div className="data-grid-header" style={{
-              gridTemplateColumns: 'minmax(120px, 1fr) minmax(100px, 0.8fr) minmax(100px, 0.8fr) minmax(120px, 0.9fr) minmax(180px, 1.4fr) minmax(180px, 1.4fr) auto',
+              gridTemplateColumns: 'minmax(120px, 1fr) minmax(100px, 0.8fr) minmax(100px, 0.8fr) minmax(120px, 0.9fr) minmax(180px, 1.4fr) minmax(160px, 1.1fr) auto',
               padding: '0 0.75rem 0.75rem',
               color: 'var(--text-secondary)',
               fontSize: '0.8rem',
@@ -799,7 +853,7 @@ export const Rooms = () => {
               <div>Status</div>
               <div>Rent</div>
               <div>Current Tenant</div>
-              <div>Advance Booking</div>
+              <div>Last Payment Date</div>
               <div style={{ textAlign: 'right' }}>Actions</div>
             </div>
 
@@ -813,7 +867,7 @@ export const Rooms = () => {
                     key={row.id}
                     className="data-grid-row"
                     style={{
-                      gridTemplateColumns: 'minmax(120px, 1fr) minmax(100px, 0.8fr) minmax(100px, 0.8fr) minmax(120px, 0.9fr) minmax(180px, 1.4fr) minmax(180px, 1.4fr) auto',
+                      gridTemplateColumns: 'minmax(120px, 1fr) minmax(100px, 0.8fr) minmax(100px, 0.8fr) minmax(120px, 0.9fr) minmax(180px, 1.4fr) minmax(160px, 1.1fr) auto',
                       padding: '1rem 0.75rem',
                       borderRadius: '14px',
                       border: '1px solid var(--border-light)',
@@ -833,7 +887,12 @@ export const Rooms = () => {
                     </div>
                     <div>{formatCurrency(Number(row.rent ?? 0))}</div>
                     <div>
-                      <div>{row.currentTenant?.name ?? 'Vacant'}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                        {row.currentTenant?.photo_url ? (
+                          <img src={row.currentTenant.photo_url} alt={row.currentTenant.name} style={{ width: '24px', height: '24px', borderRadius: '999px', objectFit: 'cover' }} />
+                        ) : null}
+                        <span>{row.currentTenant?.name ?? 'Vacant'}</span>
+                      </div>
                       {isUnpaid ? <div style={{ color: 'var(--danger)', fontSize: '0.8rem', marginTop: '0.2rem' }}>Rent unpaid</div> : null}
                       {isExpiring && row.currentTenant?.end_date ? (
                         <div style={{ color: 'var(--warning)', fontSize: '0.8rem', marginTop: '0.2rem' }}>
@@ -841,7 +900,9 @@ export const Rooms = () => {
                         </div>
                       ) : null}
                     </div>
-                    <div>{row.nextBooking ? renderBookingText(row.nextBooking) : 'None'}</div>
+                    <div>
+                      {row.lastPaymentDate ? format(new Date(row.lastPaymentDate), 'MMM dd, yyyy') : 'None'}
+                    </div>
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
                       <button type="button" onClick={() => handleStartEditBed(row)} aria-label={`Edit ${row.bed_number}`}>
                         <Pencil size={16} style={{ color: 'var(--text-secondary)' }} />

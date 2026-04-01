@@ -19,6 +19,8 @@ export type PaymentReceiptData = {
   paidAmount: number;
   remainingAmount: number;
   paymentStatus: string;
+  previousBalance: number;
+  extraCharges: { description: string; amount: number }[];
 };
 
 const escapeHtml = (value: string) => value
@@ -317,7 +319,10 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
       <div class="summary">
         <table class="table">
           <tbody>
-            <tr><td>Monthly Rent Due</td><td>${escapeHtml(formatCurrency(receipt.dueAmount))}</td></tr>
+            ${receipt.previousBalance > 0 ? `<tr><td>Previous Balance</td><td>${escapeHtml(formatCurrency(receipt.previousBalance))}</td></tr>` : ''}
+            <tr><td>Base Monthly Rent</td><td>${escapeHtml(formatCurrency(receipt.dueAmount - receipt.previousBalance - ((receipt.extraCharges || []).reduce((sum, c) => sum + c.amount, 0))))}</td></tr>
+            ${(receipt.extraCharges || []).map(charge => `<tr><td>Charge: ${escapeHtml(charge.description)}</td><td>${escapeHtml(formatCurrency(charge.amount))}</td></tr>`).join('')}
+            <tr style="font-weight: 600; background: rgba(0,0,0,0.02);"><td>Total Due</td><td>${escapeHtml(formatCurrency(receipt.dueAmount))}</td></tr>
             <tr><td>Payment Received</td><td>${escapeHtml(formatCurrency(receipt.amount))}</td></tr>
             <tr><td>Total Paid For Month</td><td>${escapeHtml(formatCurrency(receipt.paidAmount))}</td></tr>
             <tr><td>Remaining Balance</td><td>${escapeHtml(formatCurrency(receipt.remainingAmount))}</td></tr>
@@ -355,15 +360,39 @@ export const openPaymentReceipt = (
 };
 
 export const getPaymentReceiptWhatsappMessage = (receipt: PaymentReceiptData) => {
-  return [
+  const messageLines = [
     `Payment receipt from ${receipt.siteName}`,
     `Tenant: ${receipt.tenantName}`,
     `Room: ${receipt.roomName} | Bed: ${receipt.bedNumber}`,
     `Rent Month: ${format(new Date(receipt.billingMonth), 'MMMM yyyy')}`,
+  ];
+
+  if (receipt.previousBalance > 0) {
+    messageLines.push(`Previous Balance: ${formatCurrency(receipt.previousBalance)}`);
+  }
+
+  if (receipt.extraCharges && receipt.extraCharges.length > 0) {
+    messageLines.push(`Base Rent: ${formatCurrency(receipt.dueAmount - receipt.previousBalance - receipt.extraCharges.reduce((sum, c) => sum + c.amount, 0))}`);
+    receipt.extraCharges.forEach(charge => {
+      messageLines.push(`+ ${charge.description}: ${formatCurrency(charge.amount)}`);
+    });
+    messageLines.push(`Total Due: ${formatCurrency(receipt.dueAmount)}`);
+  } else {
+    if (receipt.previousBalance > 0) {
+      messageLines.push(`Base Rent: ${formatCurrency(receipt.dueAmount - receipt.previousBalance)}`);
+      messageLines.push(`Total Due: ${formatCurrency(receipt.dueAmount)}`);
+    } else {
+      messageLines.push(`Monthly Rent Due: ${formatCurrency(receipt.dueAmount)}`);
+    }
+  }
+
+  messageLines.push(
     `Amount Received: ${formatCurrency(receipt.amount)}`,
     `Remaining Balance: ${formatCurrency(receipt.remainingAmount)}`,
-    'Your PDF receipt has been prepared by the admin.',
-  ].join('\n');
+    'Your PDF receipt has been prepared.'
+  );
+
+  return messageLines.join('\n');
 };
 
 export const getWhatsappShareLink = (receipt: PaymentReceiptData) => {

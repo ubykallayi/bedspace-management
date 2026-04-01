@@ -5,11 +5,11 @@ import { Card } from '../../components/ui/Card';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
+  calculateTenantBalanceForMonth,
   formatCurrency,
   getBookingLifecycleStatus,
   getBookingStatusBadgeClass,
   getBookingStatusLabel,
-  getRentDueForBillingMonth,
   getMonthlyPaymentStatus,
   getPaymentStatusBadgeClass,
   getPaymentStatusLabel,
@@ -17,6 +17,7 @@ import {
 } from '../../lib/admin';
 import { openPaymentReceipt } from '../../lib/receipts';
 import { supabase } from '../../lib/supabase';
+import { uploadTenantAsset } from '../../lib/tenantFiles';
 
 type BedRecord = {
   id: string;
@@ -40,6 +41,8 @@ type TenantBooking = {
   prorated_rent?: number | string | null;
   start_date: string;
   end_date: string | null;
+  photo_url?: string | null;
+  document_url?: string | null;
   bed?: BedRecord | null;
   room?: RoomRecord | null;
 };
@@ -51,6 +54,18 @@ type PaymentRecord = {
   payment_date: string;
   billing_month: string;
   status: string;
+  is_balance_waived?: boolean;
+};
+
+type ChargeRecord = {
+  id?: string;
+  tenant_id: string;
+  amount: number | string;
+  billing_month: string;
+  description?: string;
+  expenses?: {
+    description?: string | null;
+  } | null;
 };
 
 type BookingCardData = {
@@ -146,8 +161,11 @@ export const TenantDashboard = () => {
   const { user } = useAuth();
   const [bookings, setBookings] = useState<TenantBooking[]>([]);
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [charges, setCharges] = useState<ChargeRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileMessage, setProfileMessage] = useState('');
 
   useEffect(() => {
     const fetchTenantData = async () => {
@@ -163,7 +181,7 @@ export const TenantDashboard = () => {
 
       const byUserResult = await supabase
         .from('tenants')
-        .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date')
+        .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date, photo_url, document_url')
         .eq('user_id', user.id)
         .order('start_date', { ascending: false });
 
@@ -177,7 +195,7 @@ export const TenantDashboard = () => {
 
         const legacyByUserResult = await supabase
           .from('tenants')
-          .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date')
+          .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date, photo_url, document_url')
           .eq('user_id', user.id)
           .order('start_date', { ascending: false });
 
@@ -197,7 +215,7 @@ export const TenantDashboard = () => {
         const normalizedEmail = user.email.toLowerCase();
         const emailLookup = await supabase
           .from('tenants')
-          .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date')
+          .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date, photo_url, document_url')
           .eq('email', normalizedEmail)
           .order('start_date', { ascending: false });
 
@@ -211,7 +229,7 @@ export const TenantDashboard = () => {
 
           const legacyEmailLookup = await supabase
             .from('tenants')
-            .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date')
+            .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date, photo_url, document_url')
             .eq('email', normalizedEmail)
             .order('start_date', { ascending: false });
 
@@ -298,7 +316,7 @@ export const TenantDashboard = () => {
       if (sortedBookings.length > 0) {
         const { data: paymentRows, error: paymentError } = await supabase
           .from('payments')
-          .select('id, tenant_id, amount, payment_date, billing_month, status')
+          .select('id, tenant_id, amount, payment_date, billing_month, status, is_balance_waived')
           .in('tenant_id', sortedBookings.map((booking) => booking.id))
           .order('payment_date', { ascending: false });
         if (paymentError) {
@@ -309,8 +327,21 @@ export const TenantDashboard = () => {
         }
 
         setPayments((paymentRows ?? []) as PaymentRecord[]);
+
+        const { data: chargeRows, error: chargeError } = await supabase
+          .from('tenant_charges')
+          .select('id, tenant_id, amount, billing_month, expenses(description)')
+          .in('tenant_id', sortedBookings.map((booking) => booking.id));
+        if (!chargeError && chargeRows) {
+          const formattedCharges = (chargeRows as ChargeRecord[]).map((c) => ({
+            ...c,
+            description: c.expenses?.description || 'Extra Charge'
+          }));
+          setCharges(formattedCharges);
+        }
       } else {
         setPayments([]);
+        setCharges([]);
       }
 
       setLoading(false);
@@ -343,6 +374,38 @@ export const TenantDashboard = () => {
     );
   }
 
+  const handleProfileFileUpload = async (file: File, assetType: 'photo' | 'document') => {
+    const primaryBooking = bookings[0];
+    if (!primaryBooking) return;
+    setProfileSaving(true);
+    setProfileMessage('');
+    try {
+      const uploadedUrl = await uploadTenantAsset({
+        tenantId: primaryBooking.id,
+        file,
+        assetType,
+      });
+      const { error } = await supabase
+        .from('tenants')
+        .update(assetType === 'photo' ? { photo_url: uploadedUrl } : { document_url: uploadedUrl })
+        .eq('id', primaryBooking.id);
+      if (error) throw error;
+      setBookings((current) => current.map((booking) => (
+        booking.id === primaryBooking.id
+          ? {
+            ...booking,
+            ...(assetType === 'photo' ? { photo_url: uploadedUrl } : { document_url: uploadedUrl }),
+          }
+          : booking
+      )));
+      setProfileMessage(assetType === 'photo' ? 'Photo updated.' : 'Document updated.');
+    } catch (error) {
+      setProfileMessage(error instanceof Error ? error.message : 'Upload failed.');
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
   const today = new Date();
   const todayKey = format(today, 'yyyy-MM-dd');
   const currentMonthStart = startOfMonth(today);
@@ -352,35 +415,27 @@ export const TenantDashboard = () => {
     booking.start_date <= format(currentMonthEnd, 'yyyy-MM-dd') &&
     (!booking.end_date || booking.end_date >= format(currentMonthStart, 'yyyy-MM-dd'))
   ));
-  const currentMonthDue = monthlyBookings.reduce((sum, booking) => sum + getRentDueForBillingMonth({
-    rentAmount: Number(booking.rent_amount),
-    proratedRent: booking.prorated_rent != null ? Number(booking.prorated_rent) : null,
-    startDate: booking.start_date,
-    billingMonth,
-  }), 0);
-  const currentMonthPaid = payments
-    .filter((payment) => payment.status === 'paid' && payment.billing_month === billingMonth)
-    .reduce((sum, payment) => sum + Number(payment.amount), 0);
-  const currentMonthRemaining = Math.max(currentMonthDue - currentMonthPaid, 0);
-  const currentMonthPaymentStatus = getMonthlyPaymentStatus(currentMonthDue, currentMonthPaid);
+  const currentMonthSummaries = monthlyBookings.map((booking) => (
+    calculateTenantBalanceForMonth(booking, billingMonth, payments, charges)
+  ));
+  const currentMonthDue = currentMonthSummaries.reduce((sum, summary) => sum + summary.dueAmount, 0);
+  const currentMonthPaid = currentMonthSummaries.reduce((sum, summary) => sum + summary.paidAmount, 0);
+  const isCurrentMonthWaived = currentMonthSummaries.some((summary) => summary.isBalanceWaived);
+  const currentMonthRemaining = currentMonthSummaries.reduce((sum, summary) => sum + summary.remainingAmount, 0);
+  const currentMonthPaymentStatus = getMonthlyPaymentStatus(currentMonthDue, currentMonthPaid, isCurrentMonthWaived);
 
   const activeBookings = bookings.filter((booking) => booking.start_date <= todayKey && (!booking.end_date || booking.end_date >= todayKey));
   const upcomingBookings = bookings.filter((booking) => booking.start_date > todayKey);
   const pastBookings = bookings.filter((booking) => booking.end_date !== null && booking.end_date < todayKey);
   const openReceiptForPayment = (payment: PaymentRecord) => {
     const relatedBooking = bookings.find((booking) => booking.id === payment.tenant_id);
-    const dueAmount = relatedBooking
-      ? getRentDueForBillingMonth({
-        rentAmount: Number(relatedBooking.rent_amount ?? 0),
-        proratedRent: relatedBooking.prorated_rent != null ? Number(relatedBooking.prorated_rent) : null,
-        startDate: relatedBooking.start_date,
-        billingMonth: payment.billing_month,
-      })
-      : 0;
-    const paidAmount = payments
-      .filter((item) => item.status === 'paid' && item.billing_month === payment.billing_month && item.tenant_id === payment.tenant_id)
-      .reduce((sum, item) => sum + Number(item.amount), 0);
-    const remainingAmount = Math.max(dueAmount - paidAmount, 0);
+    const cycleSummary = relatedBooking
+      ? calculateTenantBalanceForMonth(relatedBooking, payment.billing_month, payments, charges)
+      : null;
+    const dueAmount = cycleSummary?.dueAmount ?? 0;
+    const paidAmount = cycleSummary?.paidAmount ?? 0;
+    const remainingAmount = cycleSummary?.remainingAmount ?? 0;
+    const isWaived = cycleSummary?.isBalanceWaived ?? false;
 
     openPaymentReceipt({
       receiptNumber: payment.id.slice(0, 8).toUpperCase(),
@@ -399,7 +454,11 @@ export const TenantDashboard = () => {
       dueAmount,
       paidAmount,
       remainingAmount,
-      paymentStatus: getPaymentStatusLabel(getMonthlyPaymentStatus(dueAmount, paidAmount)),
+      previousBalance: cycleSummary?.previousBalance ?? 0,
+      paymentStatus: getPaymentStatusLabel(getMonthlyPaymentStatus(dueAmount, paidAmount, isWaived)),
+      extraCharges: charges
+        .filter((c) => c.billing_month === payment.billing_month && c.tenant_id === payment.tenant_id)
+        .map((c) => ({ description: c.description || 'Charge', amount: Number(c.amount) })),
     });
   };
 
@@ -407,6 +466,63 @@ export const TenantDashboard = () => {
     <div className="page-container animate-fade-in">
       <h1 className="page-title">Welcome, {bookings[0].name}</h1>
       <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>Here is your rental overview.</p>
+      <Card style={{ marginBottom: '1.5rem' }}>
+        <h2 style={{ marginBottom: '0.8rem' }}>Profile</h2>
+        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', alignItems: 'center' }}>
+          {bookings[0].photo_url ? (
+            <img src={bookings[0].photo_url} alt={bookings[0].name} style={{ width: '70px', height: '70px', borderRadius: '999px', objectFit: 'cover' }} />
+          ) : (
+            <div style={{ width: '70px', height: '70px', borderRadius: '999px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-glow)', fontWeight: 700 }}>
+              {bookings[0].name.slice(0, 2).toUpperCase()}
+            </div>
+          )}
+          <div style={{ display: 'grid', gap: '0.75rem', minWidth: '280px' }}>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Upload / Change Photo</label>
+              <input className="form-input" type="file" accept="image/*" onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleProfileFileUpload(file, 'photo');
+              }} disabled={profileSaving} />
+            </div>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Upload / Change Document</label>
+              <input className="form-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleProfileFileUpload(file, 'document');
+              }} disabled={profileSaving} />
+            </div>
+            {bookings[0].document_url ? (
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                <a href={bookings[0].document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.9rem' }}>
+                  View uploaded document
+                </a>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setProfileSaving(true);
+                    setProfileMessage('');
+                    try {
+                      await supabase.from('tenants').update({ document_url: null }).eq('id', bookings[0].id);
+                      setBookings((current) => current.map((booking) => (
+                        booking.id === bookings[0].id ? { ...booking, document_url: null } : booking
+                      )));
+                      setProfileMessage('Document removed.');
+                    } catch (error) {
+                      setProfileMessage(error instanceof Error ? error.message : 'Unable to remove document.');
+                    } finally {
+                      setProfileSaving(false);
+                    }
+                  }}
+                  style={{ fontSize: '0.85rem', color: 'var(--danger)' }}
+                >
+                  Remove document
+                </button>
+              </div>
+            ) : null}
+            {profileMessage ? <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{profileMessage}</div> : null}
+          </div>
+        </div>
+      </Card>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
         <Card>
@@ -440,18 +556,10 @@ export const TenantDashboard = () => {
           <div style={{ display: 'flex', flexDirection: 'column' }}>
             {payments.map((payment) => {
               const relatedBooking = bookings.find((booking) => booking.id === payment.tenant_id);
-              const cyclePaid = payments
-                .filter((item) => item.status === 'paid' && item.billing_month === payment.billing_month && item.tenant_id === payment.tenant_id)
-                .reduce((sum, item) => sum + Number(item.amount), 0);
-              const cycleDue = relatedBooking
-                ? getRentDueForBillingMonth({
-                  rentAmount: Number(relatedBooking.rent_amount ?? 0),
-                  proratedRent: relatedBooking.prorated_rent != null ? Number(relatedBooking.prorated_rent) : null,
-                  startDate: relatedBooking.start_date,
-                  billingMonth: payment.billing_month,
-                })
-                : 0;
-              const cycleStatus = getMonthlyPaymentStatus(cycleDue, cyclePaid);
+              const cycleSummary = relatedBooking
+                ? calculateTenantBalanceForMonth(relatedBooking, payment.billing_month, payments, charges)
+                : null;
+              const cycleStatus = cycleSummary?.status ?? 'unpaid';
 
               return (
                 <div key={payment.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', borderBottom: '1px solid var(--border-light)' }}>
