@@ -39,9 +39,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       message.includes('timed out') ||
       message.includes('network') ||
       message.includes('fetch') ||
-      message.includes('failed to fetch')
+      message.includes('failed to fetch') ||
+      message.includes('load failed')
     );
   };
+
+  const hasKnownRole = (value: unknown): value is AppRole => (
+    value === 'super_admin' ||
+    value === 'owner' ||
+    value === 'manager' ||
+    value === 'tenant'
+  );
 
   const getTenantActivationState = useCallback(async (user: User) => {
     const tenantRows: Array<{ id: string; is_active?: boolean | null; end_date?: string | null }> = [];
@@ -138,7 +146,28 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         return;
       }
 
-      if (data?.role === 'tenant') {
+      if (!hasKnownRole(data?.role)) {
+        const currentState = stateRef.current;
+        if (currentState.user?.id === user.id && currentState.role) {
+          setState({
+            user: currentState.user,
+            role: currentState.role,
+            isLoading: false,
+            error: null,
+          });
+          return;
+        }
+
+        setState({
+          user,
+          role: null,
+          isLoading: false,
+          error: 'Your account is signed in, but no valid role is configured yet. Please contact an admin.',
+        });
+        return;
+      }
+
+      if (data.role === 'tenant') {
         const tenantActivation = await getTenantActivationState(user);
         if (tenantActivation.blocked) {
           await supabase.auth.signOut();
@@ -154,15 +183,15 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       
       setState({
         user,
-        role: data?.role as AppRole,
+        role: data.role,
         isLoading: false,
         error: null,
       });
       lastRoleRefreshAtRef.current = Date.now();
     } catch (err) {
       console.error('Error fetching user role:', err);
+      const currentState = stateRef.current;
       if (isTransientAuthError(err)) {
-        const currentState = stateRef.current;
         if (currentState.user?.id === user.id && currentState.role) {
           setState({
             user: currentState.user,
@@ -182,9 +211,18 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         return;
       }
 
-      await supabase.auth.signOut();
+      if (currentState.user?.id === user.id && currentState.role) {
+        setState({
+          user: currentState.user,
+          role: currentState.role,
+          isLoading: false,
+          error: 'We could not refresh your account details right now. Please try again in a moment.',
+        });
+        return;
+      }
+
       setState({
-        user: null,
+        user,
         role: null,
         isLoading: false,
         error: 'Your account is signed in, but no valid role is configured yet. Please contact an admin.',
@@ -206,11 +244,20 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
 
       // Listen to auth changes
-      const { data: authListener } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+      const { data: authListener } = supabase.auth.onAuthStateChange(async (event, newSession) => {
         if (newSession?.user) {
           await fetchUserRole(newSession.user);
-        } else {
+        } else if (event === 'SIGNED_OUT') {
           setState({ user: null, role: null, isLoading: false, error: null });
+        } else {
+          try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session?.user) {
+              await fetchUserRole(session.user);
+            }
+          } catch (error) {
+            console.error('Auth change session recovery error:', error);
+          }
         }
       });
 
