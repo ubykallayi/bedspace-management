@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BedSpace Management Platform Showcase</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap');
+
+    :root {
+      --bg: #08101d;
+      --panel: rgba(18, 27, 44, 0.92);
+      --panel-soft: rgba(25, 36, 59, 0.78);
+      --line: rgba(255, 255, 255, 0.09);
+      --text: #ffffff;
+      --text-soft: #a8b6ce;
+      --text-muted: #73839d;
+      --primary: #7b61ff;
+      --secondary: #0ea5e9;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --glow: rgba(123, 97, 255, 0.32);
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      --radius-xl: 30px;
+      --radius-lg: 22px;
+      --radius-md: 16px;
+      --radius-sm: 12px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: 'Inter', sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(123, 97, 255, 0.18), transparent 28%),
+        radial-gradient(circle at top right, rgba(14, 165, 233, 0.14), transparent 30%),
+        linear-gradient(180deg, #0a1220 0%, #08101d 100%);
+      line-height: 1.55;
+    }
+
+    h1, h2, h3, h4 {
+      margin: 0;
+      font-family: 'Outfit', sans-serif;
+      letter-spacing: -0.03em;
+    }
+
+    p {
+      margin: 0;
+      color: var(--text-soft);
+    }
+
+    .page {
+      width: min(1200px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 40px 0 80px;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 28px;
+      padding: 42px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background: linear-gradient(145deg, rgba(15, 24, 40, 0.96), rgba(12, 18, 33, 0.9));
+      box-shadow: var(--shadow);
+    }
+
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: auto -10% -45% auto;
+      width: 360px;
+      height: 360px;
+      background: radial-gradient(circle, var(--glow), transparent 70%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(123, 97, 255, 0.2);
+      background: rgba(123, 97, 255, 0.1);
+      color: #d7d0ff;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      font-size: clamp(38px, 6vw, 68px);
+      line-height: 0.95;
+      margin-bottom: 18px;
+    }
+
+    .hero p.lead {
+      font-size: 18px;
+      max-width: 640px;
+    }
+
+    .hero-points {
+      margin-top: 26px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .hero-point {
+      padding: 16px 18px;
+      border-radius: var(--radius-md);
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+    }
+
+    .hero-point strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 15px;
+    }
+
+    .hero-preview {
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+
+    .preview-card {
+      border-radius: 24px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(18, 26, 43, 0.96), rgba(15, 21, 36, 0.96));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+
+    .preview-topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .preview-title {
+      font-size: 13px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+
+    .preview-shell {
+      border-radius: 18px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: #0f1626;
+    }
+
+    .preview-shell .bar {
+      height: 36px;
+      background: linear-gradient(90deg, rgba(123, 97, 255, 0.18), rgba(14, 165, 233, 0.12));
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .preview-body {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .preview-stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    .preview-stat {
+      min-height: 88px;
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .preview-stat small {
+      display: block;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .preview-stat span {
+      font-size: 26px;
+      font-weight: 800;
+    }
+
+    .section {
+      margin-top: 28px;
+      padding: 30px;
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 20px;
+      margin-bottom: 22px;
+    }
+
+    .section-header h2 {
+      font-size: clamp(28px, 4vw, 40px);
+      margin-bottom: 8px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--line);
+      color: var(--text-soft);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .feature-card, .role-card, .shot-card {
+      border-radius: var(--radius-lg);
+      padding: 22px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(23, 33, 54, 0.98), rgba(16, 23, 38, 0.98));
+    }
+
+    .feature-card h3,
+    .role-card h3,
+    .shot-card h3 {
+      margin-bottom: 10px;
+      font-size: 22px;
+    }
+
+    .feature-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    .feature-list div {
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      color: var(--text-soft);
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .role-badge {
+      display: inline-flex;
+      margin-bottom: 10px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .badge-purple { background: rgba(123, 97, 255, 0.14); color: #dacfff; }
+    .badge-blue { background: rgba(14, 165, 233, 0.14); color: #c7efff; }
+    .badge-green { background: rgba(16, 185, 129, 0.14); color: #c7ffeb; }
+    .badge-amber { background: rgba(245, 158, 11, 0.14); color: #ffe8ba; }
+
+    .shot-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .shot-frame {
+      margin-top: 14px;
+      min-height: 250px;
+      border-radius: 18px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+      background:
+        linear-gradient(180deg, rgba(8, 15, 27, 0.98), rgba(12, 18, 33, 0.98));
+      position: relative;
+    }
+
+    .shot-frame::before {
+      content: attr(data-caption);
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .shot-ui {
+      position: absolute;
+      inset: 48px 16px 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .shot-row {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    .shot-block {
+      min-height: 72px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .shot-wide {
+      min-height: 120px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, rgba(123, 97, 255, 0.12), rgba(14, 165, 233, 0.08));
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .mock-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: var(--text-soft);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .mock-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(16, 185, 129, 0.14);
+      color: #c6ffeb;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .mock-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .mock-row {
+      display: grid;
+      grid-template-columns: 1.3fr 0.9fr 0.8fr;
+      gap: 10px;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: var(--text-soft);
+      font-size: 13px;
+    }
+
+    .mock-row strong {
+      color: var(--text);
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .mock-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    .mock-kpi {
+      min-height: 86px;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .mock-kpi small {
+      display: block;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .mock-kpi span {
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .mock-alert {
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(245, 158, 11, 0.25);
+      background: rgba(245, 158, 11, 0.08);
+      color: #ffe8ba;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .workflow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .workflow-step {
+      position: relative;
+      padding: 20px;
+      border-radius: var(--radius-lg);
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .workflow-step strong {
+      display: inline-flex;
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      margin-bottom: 14px;
+      font-size: 14px;
+    }
+
+    .cta {
+      margin-top: 28px;
+      padding: 30px;
+      border-radius: var(--radius-xl);
+      background: linear-gradient(135deg, rgba(123, 97, 255, 0.16), rgba(14, 165, 233, 0.1));
+      border: 1px solid rgba(123, 97, 255, 0.18);
+      text-align: center;
+    }
+
+    .cta h2 {
+      margin-bottom: 12px;
+      font-size: clamp(28px, 4vw, 42px);
+    }
+
+    .footer-note {
+      margin-top: 24px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      .hero,
+      .grid-3,
+      .grid-2,
+      .shot-grid,
+      .workflow {
+        grid-template-columns: 1fr;
+      }
+
+      .section-header {
+        align-items: start;
+        flex-direction: column;
+      }
+    }
+
+    @media print {
+      body {
+        background: white;
+        color: #111827;
+      }
+
+      .page {
+        width: 100%;
+        padding: 0;
+      }
+
+      .hero,
+      .section,
+      .cta {
+        break-inside: avoid;
+        box-shadow: none;
+        background: white;
+        color: #111827;
+      }
+
+      p,
+      .pill,
+      .feature-list div,
+      .role-card p,
+      .feature-card p,
+      .shot-card p,
+      .workflow-step p,
+      .footer-note {
+        color: #374151;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">BedSpace Management Platform</div>
+        <h1>Modern property operations for shared accommodation.</h1>
+        <p class="lead">
+          BedSpace transforms rooms, beds, tenants, payments, expenses, backup, and access control into one responsive operational platform designed for multi-property accommodation businesses.
+        </p>
+        <div class="hero-points">
+          <div class="hero-point">
+            <strong>Built for real operators</strong>
+            Rent tracking, arrears, advanced booking, receipts, manual charges, property filters, and tenant self-service are already in place.
+          </div>
+          <div class="hero-point">
+            <strong>Role-aware by design</strong>
+            Super admin, owner, manager, and tenant access are separated cleanly with route protection and property-aware visibility.
+          </div>
+          <div class="hero-point">
+            <strong>Multi-property ready</strong>
+            Manage multiple locations with property-specific selection, permissions, and now theme color branding.
+          </div>
+          <div class="hero-point">
+            <strong>Presentation ready</strong>
+            This document can be used as a sales one-pager, stakeholder walkthrough, or product capability sheet.
+          </div>
+        </div>
+      </div>
+
+      <div class="hero-preview">
+        <div class="preview-card">
+          <div class="preview-topbar">
+            <div class="preview-title">Executive Snapshot</div>
+            <div class="pill">Live-style layout</div>
+          </div>
+          <div class="preview-shell">
+            <div class="bar"></div>
+            <div class="preview-body">
+              <div class="preview-stat-grid">
+                <div class="preview-stat">
+                  <small>Revenue</small>
+                  <span>AED 27K</span>
+                </div>
+                <div class="preview-stat">
+                  <small>Occupancy</small>
+                  <span>92%</span>
+                </div>
+                <div class="preview-stat">
+                  <small>Expenses</small>
+                  <span>AED 8K</span>
+                </div>
+                <div class="preview-stat">
+                  <small>Net</small>
+                  <span>AED 19K</span>
+                </div>
+              </div>
+              <div class="shot-wide"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Core Functionality</h2>
+          <p>Everything currently available in the app, grouped the way a client or investor would understand it.</p>
+        </div>
+        <div class="pill">Operational Coverage</div>
+      </div>
+      <div class="grid-3">
+        <div class="feature-card">
+          <h3>Property & Bed Control</h3>
+          <p>Manage multiple properties, rooms, beds, rent values, occupancy visibility, and live bed availability.</p>
+          <div class="feature-list">
+            <div>Multi-property selection and scoped views</div>
+            <div>Rooms and beds with rent, occupancy, and payment visibility</div>
+            <div>Property theme color branding</div>
+            <div>Mobile-friendly inventory layout</div>
+          </div>
+        </div>
+        <div class="feature-card">
+          <h3>Tenant Lifecycle</h3>
+          <p>Track active, upcoming, expired, and inactive tenants with support for advanced bookings and email-linked tenant access.</p>
+          <div class="feature-list">
+            <div>Tenant creation, editing, activation, and deactivation</div>
+            <div>Advanced booking without immediate login dependency</div>
+            <div>Prorated first-month rent support</div>
+            <div>Tenant dashboard with booking and receipt access</div>
+          </div>
+        </div>
+        <div class="feature-card">
+          <h3>Finance & Recovery</h3>
+          <p>Monthly rent collection, balances, receipts, expenses, manual charges, and monthly summaries for full rent operations.</p>
+          <div class="feature-list">
+            <div>Payment entry, editing, deletion, and receipts</div>
+            <div>WhatsApp-ready receipt sharing workflow</div>
+            <div>Manual charge / opening balance support</div>
+            <div>Revenue, expense, unpaid, and profit summaries</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>User Roles & Access</h2>
+          <p>Clear RBAC structure makes the platform suitable for operational teams, property owners, and residents.</p>
+        </div>
+        <div class="pill">Secure By Role</div>
+      </div>
+      <div class="grid-2">
+        <div class="role-card">
+          <div class="role-badge badge-purple">Super Admin</div>
+          <h3>Full platform control</h3>
+          <p>Manages settings, users, property creation, role assignment, backups, restore, and full operational visibility.</p>
+        </div>
+        <div class="role-card">
+          <div class="role-badge badge-blue">Owner</div>
+          <h3>Property-level command</h3>
+          <p>Full management access for assigned properties, including rooms, tenants, payments, and expenses.</p>
+        </div>
+        <div class="role-card">
+          <div class="role-badge badge-green">Manager</div>
+          <h3>Operational execution</h3>
+          <p>Handles tenants, rent collection, manual charges, expenses, and day-to-day performance without property administration power.</p>
+        </div>
+        <div class="role-card">
+          <div class="role-badge badge-amber">Tenant</div>
+          <h3>Self-service visibility</h3>
+          <p>Views only personal bookings, payment status, receipts, and booking lifecycle details.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Highlights That Differentiate This App</h2>
+          <p>These are the features that make the product feel tailored to real bedspace operations instead of generic property software.</p>
+        </div>
+        <div class="pill">High-Impact Features</div>
+      </div>
+      <div class="workflow">
+        <div class="workflow-step">
+          <strong>1</strong>
+          <h4>Advanced Bookings</h4>
+          <p>Future tenants can be reserved into beds while the current tenant remains active until the scheduled handover point.</p>
+        </div>
+        <div class="workflow-step">
+          <strong>2</strong>
+          <h4>Prorated Rent</h4>
+          <p>The first cycle can automatically calculate prorated rent from the tenant start date and carry that into balance logic.</p>
+        </div>
+        <div class="workflow-step">
+          <strong>3</strong>
+          <h4>Manual Charges</h4>
+          <p>Opening balances, damages, and special recoveries stay separate from payments while still affecting collection totals correctly.</p>
+        </div>
+        <div class="workflow-step">
+          <strong>4</strong>
+          <h4>Drive Backup & Restore</h4>
+          <p>Google Drive backup, restore from file, and restore-from-Drive support make the platform operationally resilient.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Suggested Screenshot Placements</h2>
+          <p>This section is designed so you can swap the placeholders with real screenshots later without changing the document structure.</p>
+        </div>
+        <div class="pill">Replace With Real Captures</div>
+      </div>
+      <div class="shot-grid">
+        <div class="shot-card">
+          <h3>Admin Dashboard</h3>
+          <p>Show KPI cards, unpaid alerts, occupancy, and profit summary.</p>
+          <div class="shot-frame" data-caption="Dashboard Screenshot Area">
+            <div class="shot-ui">
+              <div class="mock-header">
+                <div>V32 Karama | April 2026</div>
+                <div class="mock-chip">Owner View</div>
+              </div>
+              <div class="mock-kpi-grid">
+                <div class="mock-kpi"><small>Revenue</small><span>AED 27,420</span></div>
+                <div class="mock-kpi"><small>Expenses</small><span>AED 8,360</span></div>
+                <div class="mock-kpi"><small>Net Profit</small><span>AED 19,060</span></div>
+                <div class="mock-kpi"><small>Occupancy</small><span>92%</span></div>
+              </div>
+              <div class="mock-alert">6 tenants require follow-up for unpaid or partial balances this month.</div>
+              <div class="mock-list">
+                <div class="mock-row">
+                  <div><strong>Arjun</strong>Room 2 - Middle | Bed R2 B2</div>
+                  <div>AED 600 Paid</div>
+                  <div>AED 0 Remaining</div>
+                </div>
+                <div class="mock-row">
+                  <div><strong>Riyas</strong>Room 2 - Middle | Bed R2 B1</div>
+                  <div>AED 600 Paid</div>
+                  <div>AED 105 Remaining</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="shot-card">
+          <h3>Payments & Manual Charges</h3>
+          <p>Highlight receipts, unpaid balances, and separate manual charge workflow.</p>
+          <div class="shot-frame" data-caption="Payments Screenshot Area">
+            <div class="shot-ui">
+              <div class="mock-header">
+                <div>Rent Payments</div>
+                <div class="mock-chip">Manual Charges</div>
+              </div>
+              <div class="mock-list">
+                <div class="mock-row">
+                  <div><strong>Adithyan</strong>April 2026 rent receipt</div>
+                  <div>Paid</div>
+                  <div>AED 620</div>
+                </div>
+                <div class="mock-row">
+                  <div><strong>Opening Balance</strong>Manual charge for Amal New</div>
+                  <div>Collect Apr 2026</div>
+                  <div>AED 250</div>
+                </div>
+                <div class="mock-row">
+                  <div><strong>Utility Recovery</strong>Manual charge for Riyas</div>
+                  <div>Collect Apr 2026</div>
+                  <div>AED 85</div>
+                </div>
+              </div>
+              <div class="shot-wide"></div>
+            </div>
+          </div>
+        </div>
+        <div class="shot-card">
+          <h3>Tenants & Bookings</h3>
+          <p>Show the tenant list, booking status, advanced booking, and lifecycle badges.</p>
+          <div class="shot-frame" data-caption="Tenants Screenshot Area">
+            <div class="shot-ui">
+              <div class="mock-header">
+                <div>Tenants</div>
+                <div class="mock-chip">Active + Upcoming</div>
+              </div>
+              <div class="mock-list">
+                <div class="mock-row">
+                  <div><strong>Amal Devasya</strong>Room 2 - Middle | Bed R2 B3</div>
+                  <div>Active</div>
+                  <div>AED 670</div>
+                </div>
+                <div class="mock-row">
+                  <div><strong>Future Booking: Ibrahim</strong>Starts May 01, 2026</div>
+                  <div>Upcoming</div>
+                  <div>Bed R2 B6</div>
+                </div>
+              </div>
+              <div class="shot-wide"></div>
+            </div>
+          </div>
+        </div>
+        <div class="shot-card">
+          <h3>Settings & Multi-Property Branding</h3>
+          <p>Show properties, backup & restore, Google Drive integration, and per-property theme colors.</p>
+          <div class="shot-frame" data-caption="Settings Screenshot Area">
+            <div class="shot-ui">
+              <div class="mock-header">
+                <div>Application Settings</div>
+                <div class="mock-chip">Super Admin</div>
+              </div>
+              <div class="mock-list">
+                <div class="mock-row">
+                  <div><strong>Property: V32 Karama</strong>Dubai | Theme #7B61FF</div>
+                  <div>Google Drive</div>
+                  <div>Connected</div>
+                </div>
+                <div class="mock-row">
+                  <div><strong>Property: Sharjah Villa</strong>Theme #0EA5E9</div>
+                  <div>Backup</div>
+                  <div>Ready</div>
+                </div>
+              </div>
+              <div class="shot-wide"></div>
+            </div>
+          </div>
+        </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <div>
+          <h2>Business Value</h2>
+          <p>How to position the app in a sales conversation or stakeholder presentation.</p>
+        </div>
+        <div class="pill">Messaging Angle</div>
+      </div>
+      <div class="grid-3">
+        <div class="feature-card">
+          <h3>Reduce leakage</h3>
+          <p>By separating rent, charges, unpaid balances, and manual recoveries, the platform makes missed collections much harder to ignore.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Improve operator speed</h3>
+          <p>Role-specific dashboards, mobile-friendly admin views, and property filtering reduce time spent switching between spreadsheets and chats.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Professionalize tenant communication</h3>
+          <p>Clean receipts, WhatsApp-ready sharing, and tenant-side receipt access create a much stronger resident-facing experience.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta">
+      <h2>BedSpace is ready to be positioned as a premium operational platform.</h2>
+      <p>
+        Use this document as a sales brochure, investor summary, client demo companion, or internal rollout deck starter. Replace the screenshot placeholders with live product captures and it becomes presentation-ready immediately.
+      </p>
+    </section>
+
+    <div class="footer-note">
+      Suggested next enhancement for this document: replace the placeholder screenshot frames with real app screenshots from the live system.
+    </div>
+  </div>
+</body>
+</html>

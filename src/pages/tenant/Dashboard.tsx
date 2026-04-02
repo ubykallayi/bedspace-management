@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { differenceInDays, format, lastDayOfMonth, startOfMonth } from 'date-fns';
 import { DoorOpen, ReceiptText } from 'lucide-react';
 import { Card } from '../../components/ui/Card';
+import { Input } from '../../components/ui/Input';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -35,6 +36,11 @@ type TenantBooking = {
   name: string;
   email: string;
   phone?: string;
+  nationality?: string | null;
+  occupation?: string | null;
+  address?: string | null;
+  emergency_contact_name?: string | null;
+  emergency_contact_phone?: string | null;
   user_id: string | null;
   bed_id: string;
   rent_amount: number | string;
@@ -46,6 +52,19 @@ type TenantBooking = {
   bed?: BedRecord | null;
   room?: RoomRecord | null;
 };
+
+type TenantProfileFormState = {
+  name: string;
+  phone: string;
+  nationality: string;
+  occupation: string;
+  address: string;
+  emergency_contact_name: string;
+  emergency_contact_phone: string;
+};
+
+const DETAILED_BOOKING_SELECT = 'id, name, email, phone, nationality, occupation, address, emergency_contact_name, emergency_contact_phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date, photo_url, document_url';
+const LEGACY_DETAILED_BOOKING_SELECT = 'id, name, email, phone, nationality, occupation, address, emergency_contact_name, emergency_contact_phone, user_id, bed_id, rent_amount, start_date, end_date, photo_url, document_url';
 
 type PaymentRecord = {
   id: string;
@@ -166,6 +185,15 @@ export const TenantDashboard = () => {
   const [fetchError, setFetchError] = useState('');
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState('');
+  const [profileForm, setProfileForm] = useState<TenantProfileFormState>({
+    name: '',
+    phone: '',
+    nationality: '',
+    occupation: '',
+    address: '',
+    emergency_contact_name: '',
+    emergency_contact_phone: '',
+  });
 
   useEffect(() => {
     const fetchTenantData = async () => {
@@ -181,7 +209,7 @@ export const TenantDashboard = () => {
 
       const byUserResult = await supabase
         .from('tenants')
-        .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date, photo_url, document_url')
+        .select(DETAILED_BOOKING_SELECT)
         .eq('user_id', user.id)
         .order('start_date', { ascending: false });
 
@@ -195,7 +223,7 @@ export const TenantDashboard = () => {
 
         const legacyByUserResult = await supabase
           .from('tenants')
-          .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date, photo_url, document_url')
+          .select(LEGACY_DETAILED_BOOKING_SELECT)
           .eq('user_id', user.id)
           .order('start_date', { ascending: false });
 
@@ -215,7 +243,7 @@ export const TenantDashboard = () => {
         const normalizedEmail = user.email.toLowerCase();
         const emailLookup = await supabase
           .from('tenants')
-          .select('id, name, email, phone, user_id, bed_id, rent_amount, prorated_rent, start_date, end_date, photo_url, document_url')
+          .select(DETAILED_BOOKING_SELECT)
           .eq('email', normalizedEmail)
           .order('start_date', { ascending: false });
 
@@ -229,7 +257,7 @@ export const TenantDashboard = () => {
 
           const legacyEmailLookup = await supabase
             .from('tenants')
-            .select('id, name, email, phone, user_id, bed_id, rent_amount, start_date, end_date, photo_url, document_url')
+            .select(LEGACY_DETAILED_BOOKING_SELECT)
             .eq('email', normalizedEmail)
             .order('start_date', { ascending: false });
 
@@ -312,6 +340,16 @@ export const TenantDashboard = () => {
 
       const sortedBookings = sortBookings(enrichedBookings);
       setBookings(sortedBookings);
+      const primaryBooking = sortedBookings[0];
+      setProfileForm({
+        name: primaryBooking?.name ?? '',
+        phone: primaryBooking?.phone ?? '',
+        nationality: primaryBooking?.nationality ?? '',
+        occupation: primaryBooking?.occupation ?? '',
+        address: primaryBooking?.address ?? '',
+        emergency_contact_name: primaryBooking?.emergency_contact_name ?? '',
+        emergency_contact_phone: primaryBooking?.emergency_contact_phone ?? '',
+      });
 
       if (sortedBookings.length > 0) {
         const { data: paymentRows, error: paymentError } = await supabase
@@ -406,6 +444,43 @@ export const TenantDashboard = () => {
     }
   };
 
+  const handleProfileSave = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!bookings.length) return;
+
+    setProfileSaving(true);
+    setProfileMessage('');
+    try {
+      const bookingIds = bookings.map((booking) => booking.id);
+      const profilePayload = {
+        name: profileForm.name.trim(),
+        phone: profileForm.phone.trim(),
+        nationality: profileForm.nationality.trim() || null,
+        occupation: profileForm.occupation.trim() || null,
+        address: profileForm.address.trim() || null,
+        emergency_contact_name: profileForm.emergency_contact_name.trim() || null,
+        emergency_contact_phone: profileForm.emergency_contact_phone.trim() || null,
+      };
+
+      const { error } = await supabase
+        .from('tenants')
+        .update(profilePayload)
+        .in('id', bookingIds);
+
+      if (error) throw error;
+
+      setBookings((current) => current.map((booking) => ({
+        ...booking,
+        ...profilePayload,
+      })));
+      setProfileMessage('Profile updated successfully.');
+    } catch (error) {
+      setProfileMessage(error instanceof Error ? error.message : 'Unable to update profile.');
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
   const today = new Date();
   const todayKey = format(today, 'yyyy-MM-dd');
   const currentMonthStart = startOfMonth(today);
@@ -468,7 +543,7 @@ export const TenantDashboard = () => {
       <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>Here is your rental overview.</p>
       <Card style={{ marginBottom: '1.5rem' }}>
         <h2 style={{ marginBottom: '0.8rem' }}>Profile</h2>
-        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
           {bookings[0].photo_url ? (
             <img src={bookings[0].photo_url} alt={bookings[0].name} style={{ width: '70px', height: '70px', borderRadius: '999px', objectFit: 'cover' }} />
           ) : (
@@ -522,6 +597,68 @@ export const TenantDashboard = () => {
             {profileMessage ? <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{profileMessage}</div> : null}
           </div>
         </div>
+        <form onSubmit={handleProfileSave} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+          <Input
+            label="Full Name"
+            value={profileForm.name}
+            onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
+            disabled={profileSaving}
+            required
+          />
+          <Input
+            label="Phone Number"
+            value={profileForm.phone}
+            onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
+            disabled={profileSaving}
+            required
+          />
+          <Input
+            label="Email"
+            value={bookings[0].email}
+            disabled
+          />
+          <Input
+            label="Nationality"
+            value={profileForm.nationality}
+            onChange={(e) => setProfileForm({ ...profileForm, nationality: e.target.value })}
+            disabled={profileSaving}
+          />
+          <Input
+            label="Occupation"
+            value={profileForm.occupation}
+            onChange={(e) => setProfileForm({ ...profileForm, occupation: e.target.value })}
+            disabled={profileSaving}
+          />
+          <Input
+            label="Emergency Contact Name"
+            value={profileForm.emergency_contact_name}
+            onChange={(e) => setProfileForm({ ...profileForm, emergency_contact_name: e.target.value })}
+            disabled={profileSaving}
+          />
+          <Input
+            label="Emergency Contact Phone"
+            value={profileForm.emergency_contact_phone}
+            onChange={(e) => setProfileForm({ ...profileForm, emergency_contact_phone: e.target.value })}
+            disabled={profileSaving}
+          />
+          <div style={{ gridColumn: '1 / -1' }}>
+            <Input
+              label="Address"
+              value={profileForm.address}
+              onChange={(e) => setProfileForm({ ...profileForm, address: e.target.value })}
+              disabled={profileSaving}
+            />
+          </div>
+          <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              type="submit"
+              className="btn btn-primary"
+              disabled={profileSaving}
+            >
+              {profileSaving ? 'Saving...' : 'Update Profile'}
+            </button>
+          </div>
+        </form>
       </Card>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>

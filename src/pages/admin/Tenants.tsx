@@ -45,6 +45,11 @@ type TenantRecord = {
   name: string;
   email: string;
   phone: string;
+  nationality?: string | null;
+  occupation?: string | null;
+  address?: string | null;
+  emergency_contact_name?: string | null;
+  emergency_contact_phone?: string | null;
   bed_id: string;
   rent_amount: number | string;
   prorated_rent?: number | string | null;
@@ -64,6 +69,11 @@ type TenantFormState = {
   name: string;
   phone: string;
   email: string;
+  nationality: string;
+  occupation: string;
+  address: string;
+  emergency_contact_name: string;
+  emergency_contact_phone: string;
   bed_id: string;
   rent_amount: string;
   start_date: string;
@@ -84,6 +94,11 @@ const INITIAL_FORM_STATE: TenantFormState = {
   name: '',
   phone: '',
   email: '',
+  nationality: '',
+  occupation: '',
+  address: '',
+  emergency_contact_name: '',
+  emergency_contact_phone: '',
   bed_id: '',
   rent_amount: '',
   start_date: '',
@@ -98,10 +113,12 @@ const INITIAL_FORM_STATE: TenantFormState = {
   document_url: '',
 };
 
+const DETAILED_TENANT_SELECT = 'id, user_id, name, email, phone, nationality, occupation, address, emergency_contact_name, emergency_contact_phone, bed_id, rent_amount, prorated_rent, start_date, end_date';
+const LEGACY_DETAILED_TENANT_SELECT = 'id, user_id, name, email, phone, nationality, occupation, address, emergency_contact_name, emergency_contact_phone, bed_id, rent_amount, start_date, end_date';
 const BASE_TENANT_SELECT = 'id, user_id, name, email, phone, bed_id, rent_amount, prorated_rent, start_date, end_date';
 const LEGACY_TENANT_SELECT = 'id, user_id, name, email, phone, bed_id, rent_amount, start_date, end_date';
-const ENHANCED_TENANT_SELECT = `${BASE_TENANT_SELECT}, is_active, updated_at, updated_by`;
-const LEGACY_ENHANCED_TENANT_SELECT = `${LEGACY_TENANT_SELECT}, is_active, updated_at, updated_by`;
+const ENHANCED_TENANT_SELECT = `${DETAILED_TENANT_SELECT}, is_active, updated_at, updated_by`;
+const LEGACY_ENHANCED_TENANT_SELECT = `${LEGACY_DETAILED_TENANT_SELECT}, is_active, updated_at, updated_by`;
 const TENANTS_CACHE_KEY = 'tenants-page';
 
 export const Tenants = () => {
@@ -483,6 +500,11 @@ export const Tenants = () => {
         name: formData.name.trim(),
         email: normalizedEmail,
         phone: formData.phone.trim(),
+        nationality: formData.nationality.trim() || null,
+        occupation: formData.occupation.trim() || null,
+        address: formData.address.trim() || null,
+        emergency_contact_name: formData.emergency_contact_name.trim() || null,
+        emergency_contact_phone: formData.emergency_contact_phone.trim() || null,
         bed_id: formData.bed_id,
         property_id: selectedPropertyId,
         rent_amount: finalRent,
@@ -540,8 +562,8 @@ export const Tenants = () => {
       const tenantId = savedTenant?.id ?? editingTenantId;
       if (!tenantId) throw new Error('Unable to resolve tenant id for file upload.');
 
-      let nextPhotoUrl = formData.photo_url.trim() || null;
-      let nextDocumentUrl = formData.document_url.trim() || null;
+      let nextPhotoUrl = existingTenant?.photo_url ?? null;
+      let nextDocumentUrl = existingTenant?.document_url ?? null;
       if (tenantPhotoFile) {
         nextPhotoUrl = await uploadTenantAsset({ tenantId, file: tenantPhotoFile, assetType: 'photo' });
       }
@@ -611,6 +633,11 @@ export const Tenants = () => {
       name: tenant.name,
       phone: tenant.phone,
       email: tenant.email,
+      nationality: tenant.nationality ?? '',
+      occupation: tenant.occupation ?? '',
+      address: tenant.address ?? '',
+      emergency_contact_name: tenant.emergency_contact_name ?? '',
+      emergency_contact_phone: tenant.emergency_contact_phone ?? '',
       bed_id: tenant.bed_id,
       rent_amount: String(tenant.rent_amount ?? ''),
       start_date: tenant.start_date,
@@ -929,6 +956,12 @@ export const Tenants = () => {
             )}
           </div>
           <form onSubmit={handleAddTenant} className="tenant-form-grid">
+            <div style={{ gridColumn: '1 / -1', marginBottom: '-0.25rem' }}>
+              <h4 style={{ marginBottom: '0.35rem' }}>Personal Information</h4>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                Capture the tenant’s contact details, identity details, and emergency contact information here.
+              </p>
+            </div>
             <div className="tenant-form-profile">
               <div>
                 {(tenantPhotoFile || formData.photo_url) ? (
@@ -959,18 +992,24 @@ export const Tenants = () => {
             </div>
             <Input label="Phone Number" required value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} />
             <Input label="Tenant Email" required value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} />
-            <Input
-              label="Photo URL (optional)"
-              value={formData.photo_url}
-              onChange={(e) => setFormData({ ...formData, photo_url: e.target.value })}
-              placeholder="https://..."
-            />
-            <Input
-              label="Document URL (optional)"
-              value={formData.document_url}
-              onChange={(e) => setFormData({ ...formData, document_url: e.target.value })}
-              placeholder="https://..."
-            />
+            <Input label="Nationality" value={formData.nationality} onChange={(e) => setFormData({ ...formData, nationality: e.target.value })} />
+            <Input label="Occupation" value={formData.occupation} onChange={(e) => setFormData({ ...formData, occupation: e.target.value })} />
+            <Input label="Emergency Contact Name" value={formData.emergency_contact_name} onChange={(e) => setFormData({ ...formData, emergency_contact_name: e.target.value })} />
+            <Input label="Emergency Contact Phone" value={formData.emergency_contact_phone} onChange={(e) => setFormData({ ...formData, emergency_contact_phone: e.target.value })} />
+            <div style={{ gridColumn: '1 / -1' }}>
+              <Input
+                label="Address"
+                value={formData.address}
+                onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                placeholder="Building, area, city"
+              />
+            </div>
+            <div style={{ gridColumn: '1 / -1', marginTop: '0.25rem', marginBottom: '-0.25rem' }}>
+              <h4 style={{ marginBottom: '0.35rem' }}>Photo And Documents</h4>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                Upload the tenant’s profile photo or supporting document if needed.
+              </p>
+            </div>
             <div className="form-group">
               <label className="form-label">Upload Photo (optional)</label>
               <input
@@ -990,6 +1029,12 @@ export const Tenants = () => {
               />
             </div>
 
+            <div style={{ gridColumn: '1 / -1', marginTop: '0.25rem', marginBottom: '-0.25rem' }}>
+              <h4 style={{ marginBottom: '0.35rem' }}>Booking And Contract</h4>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                Assign the bed and manage contract-only details such as rent and dates.
+              </p>
+            </div>
             <div className="form-group">
               <label className="form-label">Assign Room & Bed</label>
               <select
