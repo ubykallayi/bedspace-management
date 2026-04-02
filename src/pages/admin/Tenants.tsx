@@ -956,12 +956,6 @@ export const Tenants = () => {
             )}
           </div>
           <form onSubmit={handleAddTenant} className="tenant-form-grid">
-            <div style={{ gridColumn: '1 / -1', marginBottom: '-0.25rem' }}>
-              <h4 style={{ marginBottom: '0.35rem' }}>Personal Information</h4>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                Capture the tenant’s contact details, identity details, and emergency contact information here.
-              </p>
-            </div>
             <div className="tenant-form-profile">
               <div>
                 {(tenantPhotoFile || formData.photo_url) ? (
@@ -1004,12 +998,6 @@ export const Tenants = () => {
                 placeholder="Building, area, city"
               />
             </div>
-            <div style={{ gridColumn: '1 / -1', marginTop: '0.25rem', marginBottom: '-0.25rem' }}>
-              <h4 style={{ marginBottom: '0.35rem' }}>Photo And Documents</h4>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                Upload the tenant’s profile photo or supporting document if needed.
-              </p>
-            </div>
             <div className="form-group">
               <label className="form-label">Upload Photo (optional)</label>
               <input
@@ -1027,13 +1015,6 @@ export const Tenants = () => {
                 accept=".pdf,.jpg,.jpeg,.png,.webp"
                 onChange={(e) => setTenantDocumentFile(e.target.files?.[0] ?? null)}
               />
-            </div>
-
-            <div style={{ gridColumn: '1 / -1', marginTop: '0.25rem', marginBottom: '-0.25rem' }}>
-              <h4 style={{ marginBottom: '0.35rem' }}>Booking And Contract</h4>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                Assign the bed and manage contract-only details such as rent and dates.
-              </p>
             </div>
             <div className="form-group">
               <label className="form-label">Assign Room & Bed</label>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { differenceInDays, format, lastDayOfMonth, startOfMonth } from 'date-fns';
 import { DoorOpen, ReceiptText } from 'lucide-react';
+import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { Input } from '../../components/ui/Input';
 import { useAppSettings } from '../../contexts/AppSettingsContext';
@@ -185,6 +186,7 @@ export const TenantDashboard = () => {
   const [fetchError, setFetchError] = useState('');
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMessage, setProfileMessage] = useState('');
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [profileForm, setProfileForm] = useState<TenantProfileFormState>({
     name: '',
     phone: '',
@@ -474,6 +476,7 @@ export const TenantDashboard = () => {
         ...profilePayload,
       })));
       setProfileMessage('Profile updated successfully.');
+      setIsEditingProfile(false);
     } catch (error) {
       setProfileMessage(error instanceof Error ? error.message : 'Unable to update profile.');
     } finally {
@@ -542,82 +545,23 @@ export const TenantDashboard = () => {
       <h1 className="page-title">Welcome, {bookings[0].name}</h1>
       <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>Here is your rental overview.</p>
       <Card style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ marginBottom: '0.8rem' }}>Profile</h2>
-        <div style={{ marginBottom: '1rem' }}>
-          <h3 style={{ marginBottom: '0.35rem', fontSize: '1rem' }}>Personal Information</h3>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-            You can update your own personal details here. Contract information like rent and dates remains managed by admin.
-          </p>
-        </div>
-        <form onSubmit={handleProfileSave} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
-          <Input
-            label="Full Name"
-            value={profileForm.name}
-            onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
-            disabled={profileSaving}
-            required
-          />
-          <Input
-            label="Phone Number"
-            value={profileForm.phone}
-            onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
-            disabled={profileSaving}
-            required
-          />
-          <Input
-            label="Email"
-            value={bookings[0].email}
-            disabled
-          />
-          <Input
-            label="Nationality"
-            value={profileForm.nationality}
-            onChange={(e) => setProfileForm({ ...profileForm, nationality: e.target.value })}
-            disabled={profileSaving}
-          />
-          <Input
-            label="Occupation"
-            value={profileForm.occupation}
-            onChange={(e) => setProfileForm({ ...profileForm, occupation: e.target.value })}
-            disabled={profileSaving}
-          />
-          <Input
-            label="Emergency Contact Name"
-            value={profileForm.emergency_contact_name}
-            onChange={(e) => setProfileForm({ ...profileForm, emergency_contact_name: e.target.value })}
-            disabled={profileSaving}
-          />
-          <Input
-            label="Emergency Contact Phone"
-            value={profileForm.emergency_contact_phone}
-            onChange={(e) => setProfileForm({ ...profileForm, emergency_contact_phone: e.target.value })}
-            disabled={profileSaving}
-          />
-          <div style={{ gridColumn: '1 / -1' }}>
-            <Input
-              label="Address"
-              value={profileForm.address}
-              onChange={(e) => setProfileForm({ ...profileForm, address: e.target.value })}
-              disabled={profileSaving}
-            />
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
+          <div>
+            <h2 style={{ marginBottom: '0.3rem' }}>Profile</h2>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+              Personal details stay editable here. Rent and contract dates remain admin-managed.
+            </p>
           </div>
-          <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end' }}>
-            <button
-              type="submit"
-              className="btn btn-primary"
-              disabled={profileSaving}
-            >
-              {profileSaving ? 'Saving...' : 'Update Personal Info'}
-            </button>
-          </div>
-        </form>
-        <div style={{ marginBottom: '1rem' }}>
-          <h3 style={{ marginBottom: '0.35rem', fontSize: '1rem' }}>Photo And Documents</h3>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-            Manage your profile photo and supporting document here.
-          </p>
+          {!isEditingProfile ? (
+            <Button variant="secondary" onClick={() => {
+              setProfileMessage('');
+              setIsEditingProfile(true);
+            }}>
+              Edit Profile
+            </Button>
+          ) : null}
         </div>
-        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '0.25rem' }}>
+        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', alignItems: 'flex-start', marginBottom: isEditingProfile ? '1rem' : '0.25rem' }}>
           {bookings[0].photo_url ? (
             <img src={bookings[0].photo_url} alt={bookings[0].name} style={{ width: '70px', height: '70px', borderRadius: '999px', objectFit: 'cover' }} />
           ) : (
@@ -625,49 +569,165 @@ export const TenantDashboard = () => {
               {bookings[0].name.slice(0, 2).toUpperCase()}
             </div>
           )}
-          <div style={{ display: 'grid', gap: '0.75rem', minWidth: '280px' }}>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Upload / Change Photo</label>
-              <input className="form-input" type="file" accept="image/*" onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleProfileFileUpload(file, 'photo');
-              }} disabled={profileSaving} />
-            </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Upload / Change Document</label>
-              <input className="form-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleProfileFileUpload(file, 'document');
-              }} disabled={profileSaving} />
-            </div>
-            {bookings[0].document_url ? (
-              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                <a href={bookings[0].document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.9rem' }}>
-                  View uploaded document
-                </a>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setProfileSaving(true);
-                    setProfileMessage('');
-                    try {
-                      await supabase.from('tenants').update({ document_url: null }).eq('id', bookings[0].id);
-                      setBookings((current) => current.map((booking) => (
-                        booking.id === bookings[0].id ? { ...booking, document_url: null } : booking
-                      )));
-                      setProfileMessage('Document removed.');
-                    } catch (error) {
-                      setProfileMessage(error instanceof Error ? error.message : 'Unable to remove document.');
-                    } finally {
-                      setProfileSaving(false);
-                    }
-                  }}
-                  style={{ fontSize: '0.85rem', color: 'var(--danger)' }}
-                >
-                  Remove document
-                </button>
+          <div style={{ flex: '1 1 340px', minWidth: 0 }}>
+            {!isEditingProfile ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.85rem 1rem' }}>
+                <div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Full Name</div>
+                  <div>{bookings[0].name || '-'}</div>
+                </div>
+                <div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Phone Number</div>
+                  <div>{bookings[0].phone || '-'}</div>
+                </div>
+                <div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Email</div>
+                  <div>{bookings[0].email || '-'}</div>
+                </div>
+                <div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Nationality</div>
+                  <div>{bookings[0].nationality || '-'}</div>
+                </div>
+                <div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Occupation</div>
+                  <div>{bookings[0].occupation || '-'}</div>
+                </div>
+                <div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Emergency Contact</div>
+                  <div>{bookings[0].emergency_contact_name || '-'}</div>
+                  {bookings[0].emergency_contact_phone ? (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{bookings[0].emergency_contact_phone}</div>
+                  ) : null}
+                </div>
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Address</div>
+                  <div>{bookings[0].address || '-'}</div>
+                </div>
+                {bookings[0].document_url ? (
+                  <div style={{ gridColumn: '1 / -1' }}>
+                    <a href={bookings[0].document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.9rem' }}>
+                      View uploaded document
+                    </a>
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+            ) : (
+              <form onSubmit={handleProfileSave} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                <Input
+                  label="Full Name"
+                  value={profileForm.name}
+                  onChange={(e) => setProfileForm({ ...profileForm, name: e.target.value })}
+                  disabled={profileSaving}
+                  required
+                />
+                <Input
+                  label="Phone Number"
+                  value={profileForm.phone}
+                  onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
+                  disabled={profileSaving}
+                  required
+                />
+                <Input label="Email" value={bookings[0].email} disabled />
+                <Input
+                  label="Nationality"
+                  value={profileForm.nationality}
+                  onChange={(e) => setProfileForm({ ...profileForm, nationality: e.target.value })}
+                  disabled={profileSaving}
+                />
+                <Input
+                  label="Occupation"
+                  value={profileForm.occupation}
+                  onChange={(e) => setProfileForm({ ...profileForm, occupation: e.target.value })}
+                  disabled={profileSaving}
+                />
+                <Input
+                  label="Emergency Contact Name"
+                  value={profileForm.emergency_contact_name}
+                  onChange={(e) => setProfileForm({ ...profileForm, emergency_contact_name: e.target.value })}
+                  disabled={profileSaving}
+                />
+                <Input
+                  label="Emergency Contact Phone"
+                  value={profileForm.emergency_contact_phone}
+                  onChange={(e) => setProfileForm({ ...profileForm, emergency_contact_phone: e.target.value })}
+                  disabled={profileSaving}
+                />
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <Input
+                    label="Address"
+                    value={profileForm.address}
+                    onChange={(e) => setProfileForm({ ...profileForm, address: e.target.value })}
+                    disabled={profileSaving}
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Photo</label>
+                  <input className="form-input" type="file" accept="image/*" onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void handleProfileFileUpload(file, 'photo');
+                  }} disabled={profileSaving} />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">Document</label>
+                  <input className="form-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void handleProfileFileUpload(file, 'document');
+                  }} disabled={profileSaving} />
+                </div>
+                <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                    {bookings[0].document_url ? (
+                      <>
+                        <a href={bookings[0].document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.9rem' }}>
+                          View uploaded document
+                        </a>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setProfileSaving(true);
+                            setProfileMessage('');
+                            try {
+                              await supabase.from('tenants').update({ document_url: null }).eq('id', bookings[0].id);
+                              setBookings((current) => current.map((booking) => (
+                                booking.id === bookings[0].id ? { ...booking, document_url: null } : booking
+                              )));
+                              setProfileMessage('Document removed.');
+                            } catch (error) {
+                              setProfileMessage(error instanceof Error ? error.message : 'Unable to remove document.');
+                            } finally {
+                              setProfileSaving(false);
+                            }
+                          }}
+                          style={{ fontSize: '0.85rem', color: 'var(--danger)' }}
+                        >
+                          Remove document
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                    <Button type="button" variant="secondary" onClick={() => {
+                      setProfileMessage('');
+                      setProfileForm({
+                        name: bookings[0].name ?? '',
+                        phone: bookings[0].phone ?? '',
+                        nationality: bookings[0].nationality ?? '',
+                        occupation: bookings[0].occupation ?? '',
+                        address: bookings[0].address ?? '',
+                        emergency_contact_name: bookings[0].emergency_contact_name ?? '',
+                        emergency_contact_phone: bookings[0].emergency_contact_phone ?? '',
+                      });
+                      setIsEditingProfile(false);
+                    }}>
+                      Cancel
+                    </Button>
+                    <Button type="submit" disabled={profileSaving}>
+                      {profileSaving ? 'Saving...' : 'Save Changes'}
+                    </Button>
+                  </div>
+                </div>
+              </form>
+            )}
             {profileMessage ? <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{profileMessage}</div> : null}
           </div>
         </div>
