@@ -24,6 +24,7 @@ type AdminPropertyContextValue = {
 };
 
 const STORAGE_KEY = 'admin:selected-property-id';
+const FOCUS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_THEME = {
   primary: '#7b61ff',
   primaryHover: '#9c89ff',
@@ -81,6 +82,7 @@ export const AdminPropertyProvider = ({ children }: { children: React.ReactNode 
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestRef = useRef(0);
+  const lastRefreshAtRef = useRef(0);
 
   const persistSelection = (propertyId: string | null) => {
     setSelectedPropertyId(propertyId);
@@ -94,7 +96,7 @@ export const AdminPropertyProvider = ({ children }: { children: React.ReactNode 
     }
   };
 
-  const refreshProperties = useCallback(async () => {
+  const refreshPropertiesInternal = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     const requestId = ++refreshRequestRef.current;
 
     if (!isAdminRole(role)) {
@@ -105,8 +107,12 @@ export const AdminPropertyProvider = ({ children }: { children: React.ReactNode 
       return;
     }
 
-    setIsLoading(true);
-    setError(null);
+    if (!silent || lastRefreshAtRef.current === 0) {
+      setIsLoading(true);
+    }
+    if (!silent) {
+      setError(null);
+    }
 
     try {
       if (role !== 'super_admin' && !user?.id) {
@@ -168,6 +174,7 @@ export const AdminPropertyProvider = ({ children }: { children: React.ReactNode 
       }
 
       setProperties(nextProperties);
+      lastRefreshAtRef.current = Date.now();
 
       const storedPropertyId = typeof window !== 'undefined'
         ? window.localStorage.getItem(STORAGE_KEY)
@@ -192,19 +199,23 @@ export const AdminPropertyProvider = ({ children }: { children: React.ReactNode 
   }, [role, selectedPropertyId, user?.id]);
 
   useEffect(() => {
-    void refreshProperties();
-  }, [refreshProperties]);
+    void refreshPropertiesInternal();
+  }, [refreshPropertiesInternal]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && isAdminRole(role)) {
-        void refreshProperties();
+      if (
+        document.visibilityState === 'visible' &&
+        isAdminRole(role) &&
+        Date.now() - lastRefreshAtRef.current > FOCUS_REFRESH_INTERVAL_MS
+      ) {
+        void refreshPropertiesInternal({ silent: true });
       }
     };
 
     const handleOnline = () => {
       if (isAdminRole(role)) {
-        void refreshProperties();
+        void refreshPropertiesInternal({ silent: true });
       }
     };
 
@@ -214,7 +225,7 @@ export const AdminPropertyProvider = ({ children }: { children: React.ReactNode 
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('online', handleOnline);
     };
-  }, [refreshProperties, role]);
+  }, [refreshPropertiesInternal, role]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
@@ -340,13 +351,13 @@ export const AdminPropertyProvider = ({ children }: { children: React.ReactNode 
       selectedProperty,
       isLoading,
       error,
-      refreshProperties,
+      refreshProperties: () => refreshPropertiesInternal(),
       selectProperty: persistSelection,
       createProperty,
       updateProperty,
       deleteProperty,
     };
-  }, [properties, selectedPropertyId, isLoading, error, refreshProperties, createProperty, updateProperty, deleteProperty]);
+  }, [properties, selectedPropertyId, isLoading, error, refreshPropertiesInternal, createProperty, updateProperty, deleteProperty]);
 
   return (
     <AdminPropertyContext.Provider value={value}>

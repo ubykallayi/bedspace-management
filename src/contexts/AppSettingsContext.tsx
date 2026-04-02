@@ -21,6 +21,8 @@ type AppSettingsContextValue = {
   refreshSettings: () => Promise<void>;
 };
 
+const FOCUS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
 const DEFAULT_SETTINGS: AppSettings = {
   site_name: 'BedSpace',
   currency_code: 'AED',
@@ -61,11 +63,16 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const refreshRequestRef = useRef(0);
+  const lastRefreshAtRef = useRef(0);
 
-  const refreshSettings = async () => {
+  const refreshSettingsInternal = async ({ silent = false }: { silent?: boolean } = {}) => {
     const requestId = ++refreshRequestRef.current;
-    setIsLoading(true);
-    setError(null);
+    if (!silent || lastRefreshAtRef.current === 0) {
+      setIsLoading(true);
+    }
+    if (!silent) {
+      setError(null);
+    }
 
     try {
       const { data, error: settingsError } = await withSupabaseTimeout(
@@ -107,6 +114,7 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
       const normalized = normalizeSettings(data);
       setSettings(normalized);
       currentSettingsSnapshot = normalized;
+      lastRefreshAtRef.current = Date.now();
       setFormattingSettings({
         currencyCode: normalized.currency_code,
         currencySymbol: normalized.currency_symbol,
@@ -129,18 +137,21 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
   };
 
   useEffect(() => {
-    void refreshSettings();
+    void refreshSettingsInternal();
   }, []);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        void refreshSettings();
+      if (
+        document.visibilityState === 'visible' &&
+        Date.now() - lastRefreshAtRef.current > FOCUS_REFRESH_INTERVAL_MS
+      ) {
+        void refreshSettingsInternal({ silent: true });
       }
     };
 
     const handleOnline = () => {
-      void refreshSettings();
+      void refreshSettingsInternal({ silent: true });
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -155,7 +166,7 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
     settings,
     isLoading,
     error,
-    refreshSettings,
+    refreshSettings: () => refreshSettingsInternal(),
   }), [settings, isLoading, error]);
 
   return (

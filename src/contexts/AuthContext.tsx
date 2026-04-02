@@ -17,6 +17,8 @@ const AuthContext = createContext<AuthState>({
   error: null,
 });
 
+const FOCUS_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [state, setState] = useState<AuthState>({
     user: null,
@@ -25,6 +27,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     error: null,
   });
   const stateRef = useRef(state);
+  const lastRoleRefreshAtRef = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -155,6 +158,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         isLoading: false,
         error: null,
       });
+      lastRoleRefreshAtRef.current = Date.now();
     } catch (err) {
       console.error('Error fetching user role:', err);
       if (isTransientAuthError(err)) {
@@ -248,7 +252,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
+      if (
+        document.visibilityState === 'visible' &&
+        Date.now() - lastRoleRefreshAtRef.current > FOCUS_REFRESH_INTERVAL_MS
+      ) {
         void rehydrate();
       }
     };
