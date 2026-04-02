@@ -1,7 +1,7 @@
-import { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { User } from '@supabase/supabase-js';
 import { AppRole } from '../lib/rbac';
-import { supabase } from '../lib/supabase';
+import { supabase, withSupabaseTimeout } from '../lib/supabase';
 
 type AuthState = {
   user: User | null;
@@ -24,6 +24,21 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     isLoading: true,
     error: null,
   });
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  const isTransientAuthError = (error: unknown) => {
+    const message = error instanceof Error ? error.message.toLowerCase() : '';
+    return (
+      message.includes('timed out') ||
+      message.includes('network') ||
+      message.includes('fetch') ||
+      message.includes('failed to fetch')
+    );
+  };
 
   const getTenantActivationState = useCallback(async (user: User) => {
     const tenantRows: Array<{ id: string; is_active?: boolean | null; end_date?: string | null }> = [];
@@ -32,16 +47,22 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         .from('tenants')
         .select('id, is_active, end_date')
         .eq('user_id', user.id),
-      user.email
-        ? supabase
+    ];
+
+    if (user.email) {
+      tenantQueries.push(
+        supabase
           .from('tenants')
           .select('id, is_active, end_date')
-          .eq('email', user.email.toLowerCase())
-        : null,
-    ].filter(Boolean);
+          .eq('email', user.email.toLowerCase()),
+      );
+    }
 
     for (const tenantQuery of tenantQueries) {
-      const response = await tenantQuery;
+      const response = await withSupabaseTimeout(
+        tenantQuery,
+        'Tenant access check timed out. Please try again.',
+      );
       if (!response) return { blocked: true };
       const { data, error } = response;
 
@@ -79,18 +100,24 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const fetchUserRole = useCallback(async (user: User) => {
     try {
-      let { data, error } = await supabase
-        .from('users')
-        .select('role, is_active')
-        .eq('id', user.id)
-        .single();
+      let { data, error } = await withSupabaseTimeout(
+        supabase
+          .from('users')
+          .select('role, is_active')
+          .eq('id', user.id)
+          .single(),
+        'Role check timed out. Please try again.',
+      );
 
       if (error?.code === '42703') {
-        const fallbackResponse = await supabase
-          .from('users')
-          .select('role')
-          .eq('id', user.id)
-          .single();
+        const fallbackResponse = await withSupabaseTimeout(
+          supabase
+            .from('users')
+            .select('role')
+            .eq('id', user.id)
+            .single(),
+          'Role check timed out. Please try again.',
+        );
         data = fallbackResponse.data ? { ...fallbackResponse.data, is_active: true } : null;
         error = fallbackResponse.error;
       }
@@ -130,6 +157,27 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       });
     } catch (err) {
       console.error('Error fetching user role:', err);
+      if (isTransientAuthError(err)) {
+        const currentState = stateRef.current;
+        if (currentState.user?.id === user.id && currentState.role) {
+          setState({
+            user: currentState.user,
+            role: currentState.role,
+            isLoading: false,
+            error: null,
+          });
+          return;
+        }
+
+        setState({
+          user,
+          role: currentState.role,
+          isLoading: false,
+          error: 'We could not refresh your account details right now. Please try again in a moment.',
+        });
+        return;
+      }
+
       await supabase.auth.signOut();
       setState({
         user: null,
@@ -142,7 +190,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   useEffect(() => {
     const fetchSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session } } = await withSupabaseTimeout(
+        supabase.auth.getSession(),
+        'Session check timed out. Please refresh and try again.',
+      );
       
       if (session?.user) {
         await fetchUserRole(session.user);
@@ -166,10 +217,51 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
     fetchSession().then((listener) => {
       subscription = listener;
+    }).catch((error) => {
+      console.error('Session bootstrap error:', error);
+      setState({
+        user: null,
+        role: null,
+        isLoading: false,
+        error: error instanceof Error ? error.message : 'Unable to restore your session.',
+      });
     });
 
     return () => {
       subscription?.unsubscribe();
+    };
+  }, [fetchUserRole]);
+
+  useEffect(() => {
+    const rehydrate = async () => {
+      try {
+        const { data: { session } } = await withSupabaseTimeout(
+          supabase.auth.getSession(),
+          'Session refresh timed out. Please try again.',
+        );
+        if (session?.user) {
+          await fetchUserRole(session.user);
+        }
+      } catch (error) {
+        console.error('Session rehydrate error:', error);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void rehydrate();
+      }
+    };
+
+    const handleOnline = () => {
+      void rehydrate();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
     };
   }, [fetchUserRole]);
 

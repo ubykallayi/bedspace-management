@@ -10,7 +10,7 @@ import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import { formatCurrency, writeActivityLog } from '../../lib/admin';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
-import { supabase } from '../../lib/supabase';
+import { supabase, withSupabaseTimeout } from '../../lib/supabase';
 
 type RoomRecord = {
   id: string;
@@ -110,59 +110,69 @@ export const Rooms = () => {
 
     setFetchError('');
 
-    const [
-      { data: roomRows, error: roomsError },
-      { data: bedRows, error: bedsError },
-      { data: tenantRows, error: tenantsError },
-    ] = await Promise.all([
-      supabase.from('rooms').select('id, name, property_id').eq('property_id', selectedPropertyId).order('name'),
-      supabase.from('beds').select('id, room_id, bed_number, status, rent, property_id').eq('property_id', selectedPropertyId).order('bed_number'),
-      supabase.from('tenants').select('id, name, photo_url, bed_id, start_date, end_date, property_id').eq('property_id', selectedPropertyId).order('start_date', { ascending: false }),
-    ]);
+    try {
+      const [
+        { data: roomRows, error: roomsError },
+        { data: bedRows, error: bedsError },
+        { data: tenantRows, error: tenantsError },
+      ] = await withSupabaseTimeout(
+        Promise.all([
+          supabase.from('rooms').select('id, name, property_id').eq('property_id', selectedPropertyId).order('name'),
+          supabase.from('beds').select('id, room_id, bed_number, status, rent, property_id').eq('property_id', selectedPropertyId).order('bed_number'),
+          supabase.from('tenants').select('id, name, photo_url, bed_id, start_date, end_date, property_id').eq('property_id', selectedPropertyId).order('start_date', { ascending: false }),
+        ]),
+        'Rooms and beds took too long to load. Please try again.',
+      );
 
-    if (roomsError || bedsError || tenantsError) {
-      const message = roomsError?.message || bedsError?.message || tenantsError?.message || 'Unable to load rooms and beds.';
-      setFetchError(message);
-      setLoading(false);
-      return;
-    }
-
-    const safeRooms = (roomRows ?? []) as RoomRecord[];
-    const safeBeds = (bedRows ?? []) as BedRecord[];
-    const safeTenantBookings = (tenantRows ?? []) as TenantBooking[];
-    let safeTenantPayments: TenantPayment[] = [];
-
-    const tenantIds = safeTenantBookings.map((tenant) => tenant.id);
-    if (tenantIds.length > 0) {
-      const { data: paymentRows, error: paymentsError } = await supabase
-        .from('payments')
-        .select('tenant_id, payment_date')
-        .in('tenant_id', tenantIds)
-        .order('payment_date', { ascending: false });
-      if (paymentsError) {
-        setFetchError(paymentsError.message || 'Unable to load payment history.');
-        setLoading(false);
+      if (roomsError || bedsError || tenantsError) {
+        const message = roomsError?.message || bedsError?.message || tenantsError?.message || 'Unable to load rooms and beds.';
+        setFetchError(message);
         return;
       }
-      safeTenantPayments = (paymentRows ?? []) as TenantPayment[];
-    }
 
-    setRooms(safeRooms);
-    setBeds(safeBeds);
-    setTenantBookings(safeTenantBookings);
-    setTenantPayments(safeTenantPayments);
-    setSelectedRoomId((current) => (
-      current && safeRooms.some((room) => room.id === current)
-        ? current
-        : safeRooms[0]?.id ?? null
-    ));
-    setCachedAdminData(cacheKey, {
-      rooms: safeRooms,
-      beds: safeBeds,
-      tenantBookings: safeTenantBookings,
-      tenantPayments: safeTenantPayments,
-    });
-    setLoading(false);
+      const safeRooms = (roomRows ?? []) as RoomRecord[];
+      const safeBeds = (bedRows ?? []) as BedRecord[];
+      const safeTenantBookings = (tenantRows ?? []) as TenantBooking[];
+      let safeTenantPayments: TenantPayment[] = [];
+
+      const tenantIds = safeTenantBookings.map((tenant) => tenant.id);
+      if (tenantIds.length > 0) {
+        const { data: paymentRows, error: paymentsError } = await withSupabaseTimeout(
+          supabase
+            .from('payments')
+            .select('tenant_id, payment_date')
+            .in('tenant_id', tenantIds)
+            .order('payment_date', { ascending: false }),
+          'Payment history took too long to load. Please try again.',
+        );
+        if (paymentsError) {
+          setFetchError(paymentsError.message || 'Unable to load payment history.');
+          return;
+        }
+        safeTenantPayments = (paymentRows ?? []) as TenantPayment[];
+      }
+
+      setRooms(safeRooms);
+      setBeds(safeBeds);
+      setTenantBookings(safeTenantBookings);
+      setTenantPayments(safeTenantPayments);
+      setSelectedRoomId((current) => (
+        current && safeRooms.some((room) => room.id === current)
+          ? current
+          : safeRooms[0]?.id ?? null
+      ));
+      setCachedAdminData(cacheKey, {
+        rooms: safeRooms,
+        beds: safeBeds,
+        tenantBookings: safeTenantBookings,
+        tenantPayments: safeTenantPayments,
+      });
+    } catch (nextError) {
+      console.error('Rooms fetch crash:', nextError);
+      setFetchError(nextError instanceof Error ? nextError.message : 'Unable to load rooms and beds.');
+    } finally {
+      setLoading(false);
+    }
   }, [selectedPropertyId]);
 
   useEffect(() => {

@@ -22,7 +22,7 @@ import {
 } from '../../lib/admin';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
-import { supabase } from '../../lib/supabase';
+import { supabase, withSupabaseTimeout } from '../../lib/supabase';
 import { uploadTenantAsset } from '../../lib/tenantFiles';
 
 type BedOption = {
@@ -181,99 +181,114 @@ export const Tenants = () => {
     }
     setFetchError('');
 
-    let tenantRows: RawTenantRecord[] = [];
-    let schemaSupportsAdminStatus = true;
-    let schemaSupportsProratedRent = true;
+    try {
+      let tenantRows: RawTenantRecord[] = [];
+      let schemaSupportsAdminStatus = true;
+      let schemaSupportsProratedRent = true;
 
-    const tenantQueries = [
-      { select: ENHANCED_TENANT_SELECT, supportsAdminStatus: true, supportsProratedRent: true },
-      { select: LEGACY_ENHANCED_TENANT_SELECT, supportsAdminStatus: true, supportsProratedRent: false },
-      { select: BASE_TENANT_SELECT, supportsAdminStatus: false, supportsProratedRent: true },
-      { select: LEGACY_TENANT_SELECT, supportsAdminStatus: false, supportsProratedRent: false },
-    ] as const;
+      const tenantQueries = [
+        { select: ENHANCED_TENANT_SELECT, supportsAdminStatus: true, supportsProratedRent: true },
+        { select: LEGACY_ENHANCED_TENANT_SELECT, supportsAdminStatus: true, supportsProratedRent: false },
+        { select: BASE_TENANT_SELECT, supportsAdminStatus: false, supportsProratedRent: true },
+        { select: LEGACY_TENANT_SELECT, supportsAdminStatus: false, supportsProratedRent: false },
+      ] as const;
 
-    for (const tenantQuery of tenantQueries) {
-      const tenantResult = await supabase
-        .from('tenants')
-        .select(tenantQuery.select)
-        .eq('property_id', selectedPropertyId)
-        .order('start_date', { ascending: false });
+      for (const tenantQuery of tenantQueries) {
+        const tenantResult = await withSupabaseTimeout(
+          supabase
+            .from('tenants')
+            .select(tenantQuery.select)
+            .eq('property_id', selectedPropertyId)
+            .order('start_date', { ascending: false }),
+          'Tenants took too long to load. Please try again.',
+        );
 
-      if (!tenantResult.error) {
-        tenantRows = (tenantResult.data ?? []) as unknown as RawTenantRecord[];
-        schemaSupportsAdminStatus = tenantQuery.supportsAdminStatus;
-        schemaSupportsProratedRent = tenantQuery.supportsProratedRent;
-        break;
+        if (!tenantResult.error) {
+          tenantRows = (tenantResult.data ?? []) as unknown as RawTenantRecord[];
+          schemaSupportsAdminStatus = tenantQuery.supportsAdminStatus;
+          schemaSupportsProratedRent = tenantQuery.supportsProratedRent;
+          break;
+        }
+
+        if (!isMissingColumnError(tenantResult.error)) {
+          console.error('Tenant fetch error:', tenantResult.error);
+          setFetchError(tenantResult.error.message || 'Unable to load tenant records.');
+          break;
+        }
       }
 
-      if (!isMissingColumnError(tenantResult.error)) {
-        console.error('Tenant fetch error:', tenantResult.error);
-        setFetchError(tenantResult.error.message || 'Unable to load tenant records.');
-        break;
-      }
-    }
-
-    const filesResult = await supabase
-      .from('tenants')
-      .select('id, photo_url, document_url')
-      .eq('property_id', selectedPropertyId);
-    if (!filesResult.error) {
-      const filesById = new Map(
-        ((filesResult.data ?? []) as Array<{ id: string; photo_url?: string | null; document_url?: string | null }>)
-          .map((row) => [row.id, row]),
+      const filesResult = await withSupabaseTimeout(
+        supabase
+          .from('tenants')
+          .select('id, photo_url, document_url')
+          .eq('property_id', selectedPropertyId),
+        'Tenant files took too long to load. Please try again.',
       );
-      tenantRows = tenantRows.map((tenant) => {
-        const fileInfo = filesById.get(tenant.id);
-        return {
-          ...tenant,
-          photo_url: fileInfo?.photo_url ?? null,
-          document_url: fileInfo?.document_url ?? null,
-        };
+      if (!filesResult.error) {
+        const filesById = new Map(
+          ((filesResult.data ?? []) as Array<{ id: string; photo_url?: string | null; document_url?: string | null }>)
+            .map((row) => [row.id, row]),
+        );
+        tenantRows = tenantRows.map((tenant) => {
+          const fileInfo = filesById.get(tenant.id);
+          return {
+            ...tenant,
+            photo_url: fileInfo?.photo_url ?? null,
+            document_url: fileInfo?.document_url ?? null,
+          };
+        });
+      }
+
+      const [
+        { data: bedsData, error: bedsError },
+        { data: roomsData, error: roomsError },
+      ] = await withSupabaseTimeout(
+        Promise.all([
+          supabase
+            .from('beds')
+            .select('id, bed_number, status, rent, room_id, property_id')
+            .eq('property_id', selectedPropertyId)
+            .order('bed_number'),
+          supabase
+            .from('rooms')
+            .select('id, name')
+            .eq('property_id', selectedPropertyId)
+            .order('name'),
+        ]),
+        'Beds and rooms took too long to load. Please try again.',
+      );
+
+      if (bedsError) {
+        console.error('Beds fetch error:', bedsError);
+        setFetchError((current) => current || bedsError.message || 'Unable to load beds.');
+      }
+      if (roomsError) {
+        console.error('Rooms fetch error:', roomsError);
+        setFetchError((current) => current || roomsError.message || 'Unable to load rooms.');
+      }
+
+      const safeBeds = (bedsData ?? []) as BedOption[];
+      const safeRooms = (roomsData ?? []) as RoomRecord[];
+
+      setTenantSchemaSupportsAdminStatus(schemaSupportsAdminStatus);
+      setTenantSchemaSupportsProratedRent(schemaSupportsProratedRent);
+      setBeds(safeBeds);
+      setRooms(safeRooms);
+      const enrichedTenants = attachRoomAndBed(tenantRows, safeBeds, safeRooms);
+      setTenants(enrichedTenants);
+      setCachedAdminData(cacheKey, {
+        tenants: enrichedTenants,
+        beds: safeBeds,
+        rooms: safeRooms,
+        tenantSchemaSupportsAdminStatus: schemaSupportsAdminStatus,
+        tenantSchemaSupportsProratedRent: schemaSupportsProratedRent,
       });
+    } catch (nextError) {
+      console.error('Tenants fetch crash:', nextError);
+      setFetchError(nextError instanceof Error ? nextError.message : 'Unable to load tenant records.');
+    } finally {
+      setLoading(false);
     }
-
-    const [
-      { data: bedsData, error: bedsError },
-      { data: roomsData, error: roomsError },
-    ] = await Promise.all([
-      supabase
-        .from('beds')
-        .select('id, bed_number, status, rent, room_id, property_id')
-        .eq('property_id', selectedPropertyId)
-        .order('bed_number'),
-      supabase
-        .from('rooms')
-        .select('id, name')
-        .eq('property_id', selectedPropertyId)
-        .order('name'),
-    ]);
-
-    if (bedsError) {
-      console.error('Beds fetch error:', bedsError);
-      setFetchError((current) => current || bedsError.message || 'Unable to load beds.');
-    }
-    if (roomsError) {
-      console.error('Rooms fetch error:', roomsError);
-      setFetchError((current) => current || roomsError.message || 'Unable to load rooms.');
-    }
-
-    const safeBeds = (bedsData ?? []) as BedOption[];
-    const safeRooms = (roomsData ?? []) as RoomRecord[];
-
-    setTenantSchemaSupportsAdminStatus(schemaSupportsAdminStatus);
-    setTenantSchemaSupportsProratedRent(schemaSupportsProratedRent);
-    setBeds(safeBeds);
-    setRooms(safeRooms);
-    const enrichedTenants = attachRoomAndBed(tenantRows, safeBeds, safeRooms);
-    setTenants(enrichedTenants);
-    setCachedAdminData(cacheKey, {
-      tenants: enrichedTenants,
-      beds: safeBeds,
-      rooms: safeRooms,
-      tenantSchemaSupportsAdminStatus: schemaSupportsAdminStatus,
-      tenantSchemaSupportsProratedRent: schemaSupportsProratedRent,
-    });
-    setLoading(false);
   }, [attachRoomAndBed, selectedPropertyId]);
 
   useEffect(() => {
@@ -913,8 +928,8 @@ export const Tenants = () => {
               </div>
             )}
           </div>
-          <form onSubmit={handleAddTenant} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <form onSubmit={handleAddTenant} className="tenant-form-grid">
+            <div className="tenant-form-profile">
               <div>
                 {(tenantPhotoFile || formData.photo_url) ? (
                   <img
@@ -938,7 +953,9 @@ export const Tenants = () => {
                   </div>
                 )}
               </div>
-              <Input label="Full Name" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
+              <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                <Input label="Full Name" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
+              </div>
             </div>
             <Input label="Phone Number" required value={formData.phone} onChange={(e) => setFormData({ ...formData, phone: e.target.value })} />
             <Input label="Tenant Email" required value={formData.email} onChange={(e) => setFormData({ ...formData, email: e.target.value })} />
@@ -1139,7 +1156,7 @@ export const Tenants = () => {
               You can assign any email now. When that tenant signs up with the same email later, the portal can be linked to this booking. Bed rent auto-fills on selection, and the first month is saved as prorated rent based on the start date.
             </p>
 
-            <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', marginTop: '1rem', flexWrap: 'wrap' }}>
+            <div className="tenant-form-submit">
               <Button type="submit" disabled={beds.length === 0}>{editingTenantId ? 'Update Tenant' : 'Save Tenant'}</Button>
             </div>
           </form>

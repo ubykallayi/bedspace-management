@@ -52,16 +52,13 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
     :root {
       color-scheme: light;
       --accent: #5b47d6;
-      --accent-soft: #ece8ff;
-      --accent-deep: #2a215c;
-      --success-soft: #e8fbf2;
-      --success: #14804a;
-      --warning-soft: #fff4df;
-      --warning: #b76a00;
+      --accent-soft: #f1edff;
+      --accent-deep: #2f246f;
       --ink: #152033;
       --muted: #667085;
       --line: #dbe3f0;
       --surface: #f8faff;
+      --paper: #ffffff;
     }
     * {
       box-sizing: border-box;
@@ -70,42 +67,40 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
     }
     body {
       margin: 0;
-      font-family: Arial, sans-serif;
+      font-family: Inter, Arial, sans-serif;
       color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(91, 71, 214, 0.12), transparent 28%),
-        linear-gradient(180deg, #f4f7fc 0%, #edf2f9 100%);
-      padding: 24px;
+      background: #f4f6fb;
+      padding: 18px;
     }
     .receipt {
       max-width: 860px;
       margin: 0 auto;
-      background: #fff;
-      border-radius: 18px;
+      background: var(--paper);
+      border-radius: 16px;
       overflow: hidden;
-      box-shadow: 0 18px 50px rgba(17, 24, 39, 0.12);
-      border: 1px solid #e8eef8;
+      box-shadow: 0 12px 32px rgba(17, 24, 39, 0.08);
+      border: 1px solid #e2e8f5;
     }
     .header {
-      background:
-        radial-gradient(circle at top right, rgba(255,255,255,0.16), transparent 30%),
-        linear-gradient(135deg, #1f2a44, #5b47d6);
-      color: #fff;
-      padding: 28px 32px;
+      background: #fff;
+      color: var(--ink);
+      padding: 26px 28px 22px;
       display: flex;
       justify-content: space-between;
       gap: 24px;
       flex-wrap: wrap;
+      border-top: 6px solid var(--accent);
+      border-bottom: 1px solid var(--line);
     }
     .title {
-      font-size: 30px;
+      font-size: 28px;
       font-weight: 700;
       margin: 0 0 6px;
     }
     .subtitle {
       margin: 0;
-      opacity: 0.88;
       font-size: 14px;
+      color: var(--muted);
     }
     .meta {
       text-align: right;
@@ -116,7 +111,7 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
       font-size: 14px;
     }
     .section {
-      padding: 28px 32px;
+      padding: 22px 28px;
       border-top: 1px solid var(--line);
     }
     .detail-shell {
@@ -126,12 +121,12 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
     }
     .detail-card {
       border: 1px solid var(--line);
-      border-radius: 16px;
+      border-radius: 14px;
       background: #fff;
-      padding: 20px;
+      padding: 18px;
     }
     .detail-card.soft {
-      background: linear-gradient(135deg, #faf8ff, #ffffff);
+      background: #fbfaff;
       border-color: #ddd5ff;
     }
     .detail-title {
@@ -176,12 +171,18 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
       grid-template-columns: 2fr 1fr;
       gap: 20px;
     }
+    .table-wrap {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #fff;
+    }
     .table {
       width: 100%;
       border-collapse: collapse;
     }
     .table td {
-      padding: 12px 0;
+      padding: 12px 16px;
       border-bottom: 1px solid var(--line);
       vertical-align: top;
     }
@@ -212,7 +213,7 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
       color: var(--accent);
     }
     .footer {
-      padding: 0 32px 28px;
+      padding: 0 28px 24px;
       color: var(--muted);
       font-size: 13px;
     }
@@ -254,15 +255,41 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
       body { background: #fff !important; padding: 0; }
       .actions { display: none; }
       .print-note { display: none; }
-      .receipt { box-shadow: none; border: none; }
+      .receipt { box-shadow: none; border: 1px solid #d8deea; }
+      .header { border-top-width: 4px; }
     }
     @media (max-width: 720px) {
-      body { padding: 12px; }
-      .section, .header { padding: 20px; }
+      body { padding: 0; background: #fff; }
+      .actions {
+        padding: 12px 12px 0;
+        margin-bottom: 12px;
+        justify-content: stretch;
+      }
+      .actions button {
+        flex: 1 1 160px;
+      }
+      .print-note {
+        margin: 0 12px 12px;
+      }
+      .receipt {
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+        box-shadow: none;
+      }
+      .section, .header { padding: 18px 16px; }
       .detail-shell,
       .detail-grid { grid-template-columns: 1fr; }
       .summary { grid-template-columns: 1fr; }
       .meta { text-align: left; }
+      .title { font-size: 24px; }
+      .table td {
+        padding: 10px 12px;
+        font-size: 13px;
+      }
+      .totals {
+        padding: 16px;
+      }
     }
   </style>
 </head>
@@ -317,17 +344,19 @@ export const buildPaymentReceiptHtml = (receipt: PaymentReceiptData) => {
 
     <div class="section">
       <div class="summary">
-        <table class="table">
-          <tbody>
-            ${receipt.previousBalance > 0 ? `<tr><td>Previous Balance</td><td>${escapeHtml(formatCurrency(receipt.previousBalance))}</td></tr>` : ''}
-            <tr><td>Base Monthly Rent</td><td>${escapeHtml(formatCurrency(receipt.dueAmount - receipt.previousBalance - ((receipt.extraCharges || []).reduce((sum, c) => sum + c.amount, 0))))}</td></tr>
-            ${(receipt.extraCharges || []).map(charge => `<tr><td>Charge: ${escapeHtml(charge.description)}</td><td>${escapeHtml(formatCurrency(charge.amount))}</td></tr>`).join('')}
-            <tr style="font-weight: 600; background: rgba(0,0,0,0.02);"><td>Total Due</td><td>${escapeHtml(formatCurrency(receipt.dueAmount))}</td></tr>
-            <tr><td>Payment Received</td><td>${escapeHtml(formatCurrency(receipt.amount))}</td></tr>
-            <tr><td>Total Paid For Month</td><td>${escapeHtml(formatCurrency(receipt.paidAmount))}</td></tr>
-            <tr><td>Remaining Balance</td><td>${escapeHtml(formatCurrency(receipt.remainingAmount))}</td></tr>
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table">
+            <tbody>
+              ${receipt.previousBalance > 0 ? `<tr><td>Previous Balance</td><td>${escapeHtml(formatCurrency(receipt.previousBalance))}</td></tr>` : ''}
+              <tr><td>Base Monthly Rent</td><td>${escapeHtml(formatCurrency(receipt.dueAmount - receipt.previousBalance - ((receipt.extraCharges || []).reduce((sum, c) => sum + c.amount, 0))))}</td></tr>
+              ${(receipt.extraCharges || []).map(charge => `<tr><td>Charge: ${escapeHtml(charge.description)}</td><td>${escapeHtml(formatCurrency(charge.amount))}</td></tr>`).join('')}
+              <tr style="font-weight: 600; background: rgba(91, 71, 214, 0.05);"><td>Total Due</td><td>${escapeHtml(formatCurrency(receipt.dueAmount))}</td></tr>
+              <tr><td>Payment Received</td><td>${escapeHtml(formatCurrency(receipt.amount))}</td></tr>
+              <tr><td>Total Paid For Month</td><td>${escapeHtml(formatCurrency(receipt.paidAmount))}</td></tr>
+              <tr><td>Remaining Balance</td><td>${escapeHtml(formatCurrency(receipt.remainingAmount))}</td></tr>
+            </tbody>
+          </table>
+        </div>
         <div class="totals">
           <div class="label">Receipt Summary</div>
           <div class="totals-row"><span>Amount Received</span><strong>${escapeHtml(formatCurrency(receipt.amount))}</strong></div>

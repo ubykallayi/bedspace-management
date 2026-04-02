@@ -33,11 +33,13 @@ export const Settings = () => {
   const [saveSuccess, setSaveSuccess] = useState('');
   const [propertyName, setPropertyName] = useState('');
   const [propertyLocation, setPropertyLocation] = useState('');
+  const [propertyThemeColor, setPropertyThemeColor] = useState('#7b61ff');
   const [propertyError, setPropertyError] = useState('');
   const [propertySuccess, setPropertySuccess] = useState('');
   const [editingPropertyId, setEditingPropertyId] = useState<string | null>(null);
   const [editingPropertyName, setEditingPropertyName] = useState('');
   const [editingPropertyLocation, setEditingPropertyLocation] = useState('');
+  const [editingPropertyThemeColor, setEditingPropertyThemeColor] = useState('#7b61ff');
   const [showCreatePropertyForm, setShowCreatePropertyForm] = useState(false);
   const [pendingDeletePropertyId, setPendingDeletePropertyId] = useState<string | null>(null);
   const [backupState, setBackupState] = useState<{
@@ -122,6 +124,7 @@ export const Settings = () => {
     const result = await createProperty({
       name: propertyName,
       location: propertyLocation,
+      theme_color: propertyThemeColor,
     });
 
     if (result.error) {
@@ -138,14 +141,16 @@ export const Settings = () => {
     });
     setPropertyName('');
     setPropertyLocation('');
+    setPropertyThemeColor('#7b61ff');
     setShowCreatePropertyForm(false);
     setPropertySuccess('Property created successfully.');
   };
 
-  const handleStartEditProperty = (property: { id: string; name: string; location: string }) => {
+  const handleStartEditProperty = (property: { id: string; name: string; location: string; theme_color?: string | null }) => {
     setEditingPropertyId(property.id);
     setEditingPropertyName(property.name);
     setEditingPropertyLocation(property.location);
+    setEditingPropertyThemeColor(property.theme_color?.trim() || '#7b61ff');
     setPropertyError('');
     setPropertySuccess('');
   };
@@ -154,6 +159,7 @@ export const Settings = () => {
     setEditingPropertyId(null);
     setEditingPropertyName('');
     setEditingPropertyLocation('');
+    setEditingPropertyThemeColor('#7b61ff');
   };
 
   const handleUpdateProperty = async (propertyId: string) => {
@@ -164,6 +170,7 @@ export const Settings = () => {
       id: propertyId,
       name: editingPropertyName,
       location: editingPropertyLocation,
+      theme_color: editingPropertyThemeColor,
     });
 
     if (result.error) {
@@ -455,6 +462,12 @@ export const Settings = () => {
               onChange={(event) => setPropertyLocation(event.target.value)}
               placeholder="e.g. Dubai, Al Nahda"
             />
+            <Input
+              type="color"
+              label="Theme Color"
+              value={propertyThemeColor}
+              onChange={(event) => setPropertyThemeColor(event.target.value)}
+            />
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', flexWrap: 'wrap' }}>
               <Button type="button" variant="secondary" onClick={() => setShowCreatePropertyForm(false)}>
                 Cancel
@@ -490,6 +503,7 @@ export const Settings = () => {
                   borderRadius: 'var(--radius-md)',
                   padding: '1rem',
                   background: property.id === selectedPropertyId ? 'var(--primary-glow)' : 'rgba(255,255,255,0.02)',
+                  boxShadow: property.theme_color ? `inset 0 0 0 1px ${property.theme_color}` : undefined,
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', marginBottom: '0.5rem' }}>
@@ -526,6 +540,12 @@ export const Settings = () => {
                       value={editingPropertyLocation}
                       onChange={(event) => setEditingPropertyLocation(event.target.value)}
                     />
+                    <Input
+                      type="color"
+                      label="Theme Color"
+                      value={editingPropertyThemeColor}
+                      onChange={(event) => setEditingPropertyThemeColor(event.target.value)}
+                    />
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', flexWrap: 'wrap' }}>
                       <Button type="button" variant="secondary" onClick={handleCancelEditProperty}>
                         Cancel
@@ -536,9 +556,15 @@ export const Settings = () => {
                     </div>
                   </div>
                 ) : (
-                  <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
-                    {property.location || 'Location not set'}
-                  </p>
+                  <div style={{ display: 'grid', gap: '0.35rem' }}>
+                    <p style={{ color: 'var(--text-secondary)', margin: 0 }}>
+                      {property.location || 'Location not set'}
+                    </p>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-tertiary)', fontSize: '0.85rem' }}>
+                      <span style={{ width: '14px', height: '14px', borderRadius: '999px', background: property.theme_color || '#7b61ff', border: '1px solid rgba(255,255,255,0.16)' }} />
+                      {property.theme_color || '#7b61ff'}
+                    </div>
+                  </div>
                 )}
               </div>
             ))}

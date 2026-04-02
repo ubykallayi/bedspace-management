@@ -1,5 +1,5 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { supabase, withSupabaseTimeout } from '../lib/supabase';
 import { setFormattingSettings } from '../lib/admin';
 
 export type AppSettings = {
@@ -60,19 +60,39 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const refreshRequestRef = useRef(0);
 
   const refreshSettings = async () => {
+    const requestId = ++refreshRequestRef.current;
     setIsLoading(true);
     setError(null);
 
-    const { data, error: settingsError } = await supabase
-      .from('app_settings')
-      .select('site_name, currency_code, currency_symbol, company_name, support_email, support_phone, timezone, expense_categories, google_drive_client_id')
-      .eq('id', 1)
-      .maybeSingle();
+    try {
+      const { data, error: settingsError } = await withSupabaseTimeout(
+        supabase
+          .from('app_settings')
+          .select('site_name, currency_code, currency_symbol, company_name, support_email, support_phone, timezone, expense_categories, google_drive_client_id')
+          .eq('id', 1)
+          .maybeSingle(),
+        'Settings took too long to load. Please try again.',
+      );
 
-    if (settingsError) {
-      if (settingsError.code === '42P01' || settingsError.code === '42703') {
+      if (requestId !== refreshRequestRef.current) return;
+
+      if (settingsError) {
+        if (settingsError.code === '42P01' || settingsError.code === '42703') {
+          const fallbackSettings = normalizeSettings(null);
+          setSettings(fallbackSettings);
+          currentSettingsSnapshot = fallbackSettings;
+          setFormattingSettings({
+            currencyCode: fallbackSettings.currency_code,
+            currencySymbol: fallbackSettings.currency_symbol,
+          });
+          setError('Settings table is not ready yet. Using default app settings for now.');
+          return;
+        }
+
+        console.error('App settings fetch error:', settingsError);
         const fallbackSettings = normalizeSettings(null);
         setSettings(fallbackSettings);
         currentSettingsSnapshot = fallbackSettings;
@@ -80,12 +100,19 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
           currencyCode: fallbackSettings.currency_code,
           currencySymbol: fallbackSettings.currency_symbol,
         });
-        setError('Settings table is not ready yet. Using default app settings for now.');
-        setIsLoading(false);
+        setError(settingsError.message || 'Unable to load app settings.');
         return;
       }
 
-      console.error('App settings fetch error:', settingsError);
+      const normalized = normalizeSettings(data);
+      setSettings(normalized);
+      currentSettingsSnapshot = normalized;
+      setFormattingSettings({
+        currencyCode: normalized.currency_code,
+        currencySymbol: normalized.currency_symbol,
+      });
+    } catch (nextError) {
+      console.error('App settings refresh error:', nextError);
       const fallbackSettings = normalizeSettings(null);
       setSettings(fallbackSettings);
       currentSettingsSnapshot = fallbackSettings;
@@ -93,23 +120,35 @@ export const AppSettingsProvider = ({ children }: { children: React.ReactNode })
         currencyCode: fallbackSettings.currency_code,
         currencySymbol: fallbackSettings.currency_symbol,
       });
-      setError(settingsError.message || 'Unable to load app settings.');
-      setIsLoading(false);
-      return;
+      setError(nextError instanceof Error ? nextError.message : 'Unable to load app settings.');
+    } finally {
+      if (requestId === refreshRequestRef.current) {
+        setIsLoading(false);
+      }
     }
-
-    const normalized = normalizeSettings(data);
-    setSettings(normalized);
-    currentSettingsSnapshot = normalized;
-    setFormattingSettings({
-      currencyCode: normalized.currency_code,
-      currencySymbol: normalized.currency_symbol,
-    });
-    setIsLoading(false);
   };
 
   useEffect(() => {
     void refreshSettings();
+  }, []);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshSettings();
+      }
+    };
+
+    const handleOnline = () => {
+      void refreshSettings();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
+    };
   }, []);
 
   const value = useMemo(() => ({

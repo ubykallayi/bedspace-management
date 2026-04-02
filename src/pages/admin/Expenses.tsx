@@ -17,7 +17,7 @@ import {
 } from '../../lib/admin';
 import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
-import { supabase } from '../../lib/supabase';
+import { supabase, withSupabaseTimeout } from '../../lib/supabase';
 
 type ExpenseRecord = {
   id: string;
@@ -60,10 +60,11 @@ export const Expenses = () => {
   const formCardRef = useRef<HTMLDivElement>(null);
 
   const fetchExpenses = useCallback(async () => {
+    const cacheKey = `${EXPENSES_CACHE_KEY}:${selectedPropertyId ?? 'global'}`;
     const cached = getCachedAdminData<{
       expenses: ExpenseRecord[];
       schemaReady: boolean;
-    }>(EXPENSES_CACHE_KEY);
+    }>(cacheKey);
 
     if (cached) {
       setExpenses(cached.expenses);
@@ -74,49 +75,61 @@ export const Expenses = () => {
     }
     setFetchError('');
 
-    const { data, error } = await supabase
-      .from('expenses')
-      .select('id, description, amount, expense_date, category')
-      .order('expense_date', { ascending: false });
+    try {
+      const { data, error } = await withSupabaseTimeout(
+        supabase
+          .from('expenses')
+          .select('id, description, amount, expense_date, category')
+          .order('expense_date', { ascending: false }),
+        'Expenses took too long to load. Please try again.',
+      );
 
-    if (error) {
-      if (isMissingTableError(error)) {
-        setSchemaReady(false);
-        setExpenses([]);
-        setCachedAdminData(EXPENSES_CACHE_KEY, {
-          expenses: [],
-          schemaReady: false,
-        });
-        setLoading(false);
+      if (error) {
+        if (isMissingTableError(error)) {
+          setSchemaReady(false);
+          setExpenses([]);
+          setCachedAdminData(cacheKey, {
+            expenses: [],
+            schemaReady: false,
+          });
+          return;
+        }
+
+        console.error('Expense fetch error:', error);
+        setFetchError(error.message || 'Unable to load expenses.');
         return;
       }
 
-      console.error('Expense fetch error:', error);
-      setFetchError(error.message || 'Unable to load expenses.');
-      setLoading(false);
-      return;
-    }
-
-    setSchemaReady(true);
-    setExpenses((data ?? []) as ExpenseRecord[]);
-    
-    if (selectedPropertyId) {
-      const { data: tenantData } = await supabase
-        .from('tenants')
-        .select('id, name')
-        .eq('property_id', selectedPropertyId)
-        .eq('is_active', true)
-        .order('name');
-      if (tenantData) {
-        setTenants(tenantData as TenantOption[]);
+      setSchemaReady(true);
+      setExpenses((data ?? []) as ExpenseRecord[]);
+      
+      if (selectedPropertyId) {
+        const { data: tenantData } = await withSupabaseTimeout(
+          supabase
+            .from('tenants')
+            .select('id, name')
+            .eq('property_id', selectedPropertyId)
+            .eq('is_active', true)
+            .order('name'),
+          'Active tenants took too long to load. Please try again.',
+        );
+        if (tenantData) {
+          setTenants(tenantData as TenantOption[]);
+        }
+      } else {
+        setTenants([]);
       }
-    }
 
-    setCachedAdminData(EXPENSES_CACHE_KEY, {
-      expenses: (data ?? []) as ExpenseRecord[],
-      schemaReady: true,
-    });
-    setLoading(false);
+      setCachedAdminData(cacheKey, {
+        expenses: (data ?? []) as ExpenseRecord[],
+        schemaReady: true,
+      });
+    } catch (nextError) {
+      console.error('Expense fetch crash:', nextError);
+      setFetchError(nextError instanceof Error ? nextError.message : 'Unable to load expenses.');
+    } finally {
+      setLoading(false);
+    }
   }, [selectedPropertyId]);
 
   useEffect(() => {
@@ -134,17 +147,23 @@ export const Expenses = () => {
       .catch((error) => console.error('Expense alerts error:', error));
   }, [expenses, selectedPropertyId]);
 
-  const selectedMonthStart = useMemo(() => startOfMonth(new Date(`${selectedMonth}-01`)), [selectedMonth]);
-  const selectedMonthEnd = useMemo(() => lastDayOfMonth(selectedMonthStart), [selectedMonthStart]);
-  const selectedMonthStartKey = useMemo(() => format(selectedMonthStart, 'yyyy-MM-dd'), [selectedMonthStart]);
-  const selectedMonthEndKey = useMemo(() => format(selectedMonthEnd, 'yyyy-MM-dd'), [selectedMonthEnd]);
+  const isAllMonths = selectedMonth.trim().length === 0;
+  const effectiveMonthStart = useMemo(() => (
+    isAllMonths ? startOfMonth(new Date()) : startOfMonth(new Date(`${selectedMonth}-01`))
+  ), [isAllMonths, selectedMonth]);
+  const effectiveMonthEnd = useMemo(() => lastDayOfMonth(effectiveMonthStart), [effectiveMonthStart]);
+  const selectedMonthStartKey = useMemo(() => format(effectiveMonthStart, 'yyyy-MM-dd'), [effectiveMonthStart]);
+  const selectedMonthEndKey = useMemo(() => format(effectiveMonthEnd, 'yyyy-MM-dd'), [effectiveMonthEnd]);
+  const selectedMonthLabel = isAllMonths ? 'All Expenses' : format(effectiveMonthStart, 'MMMM yyyy');
 
   const monthlyExpenses = useMemo(() => (
-    expenses.filter((expense) => (
-      expense.expense_date >= selectedMonthStartKey &&
-      expense.expense_date <= selectedMonthEndKey
-    ))
-  ), [expenses, selectedMonthEndKey, selectedMonthStartKey]);
+    isAllMonths
+      ? expenses
+      : expenses.filter((expense) => (
+        expense.expense_date >= selectedMonthStartKey &&
+        expense.expense_date <= selectedMonthEndKey
+      ))
+  ), [expenses, isAllMonths, selectedMonthEndKey, selectedMonthStartKey]);
 
   const totalMonthlyExpenses = useMemo(() => (
     monthlyExpenses.reduce((sum, expense) => sum + Number(expense.amount), 0)
@@ -155,7 +174,11 @@ export const Expenses = () => {
       .split('\n')
       .map((value) => value.trim())
       .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right))
   ), [settings.expense_categories]);
+  const sortedTenants = useMemo(() => (
+    [...tenants].sort((left, right) => left.name.localeCompare(right.name))
+  ), [tenants]);
 
   const handleSaveExpense = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -319,7 +342,7 @@ export const Expenses = () => {
 
   const exportExpensesCsv = () => {
     downloadCsv(
-      `expenses-${selectedMonth}.csv`,
+      `expenses-${isAllMonths ? 'all' : selectedMonth}.csv`,
       ['Date', 'Category', 'Description', 'Amount'],
       monthlyExpenses.map((expense) => [
         expense.expense_date,
@@ -361,6 +384,18 @@ export const Expenses = () => {
           <p style={{ color: 'var(--text-secondary)' }}>Track monthly spending and keep your operating costs visible beside rent collections.</p>
         </div>
         <div className="admin-toolbar">
+          <div className="toolbar-month-field">
+            <Input
+              type="month"
+              value={selectedMonth}
+              aria-label="Expense month"
+              title="Expense month"
+              onChange={(event) => setSelectedMonth(event.target.value)}
+            />
+          </div>
+          <Button variant={isAllMonths ? 'primary' : 'secondary'} onClick={() => setSelectedMonth('')}>
+            All
+          </Button>
           <Button className="desktop-only" variant="secondary" onClick={exportExpensesCsv}>
             <Download size={16} /> Export CSV
           </Button>
@@ -410,16 +445,8 @@ export const Expenses = () => {
 
       <Card style={{ marginBottom: '1.5rem' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', alignItems: 'stretch' }}>
-          <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-            <Input
-              type="month"
-              label="Month"
-              value={selectedMonth}
-              onChange={(event) => setSelectedMonth(event.target.value)}
-            />
-          </div>
           <div style={{ padding: '1rem 1.1rem', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', background: 'rgba(255,255,255,0.02)' }}>
-            <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Total Expenses</div>
+            <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>{isAllMonths ? 'Total Expenses' : 'Month Total'}</div>
             <h2 style={{ marginTop: '0.5rem', color: 'var(--danger)' }}>{formatCurrency(totalMonthlyExpenses)}</h2>
           </div>
           <div style={{ padding: '1rem 1.1rem', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', background: 'rgba(255,255,255,0.02)' }}>
@@ -496,7 +523,7 @@ export const Expenses = () => {
                     const isChecked = e.target.checked;
                     setDistributeToTenants(isChecked);
                     if (isChecked && !editingExpenseId) {
-                      setSelectedTenants(tenants.map((t) => t.id));
+                      setSelectedTenants(sortedTenants.map((t) => t.id));
                     } else if (!isChecked) {
                       setSelectedTenants([]);
                     }
@@ -509,25 +536,52 @@ export const Expenses = () => {
               </div>
               
               {distributeToTenants && (
-                <div style={{ padding: '1rem', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', maxHeight: '200px', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '0.75rem', background: 'rgba(255,255,255,0.02)' }}>
-                   {tenants.map((t) => (
-                      <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                         <input
-                           type="checkbox"
-                           id={`tenant_${t.id}`}
-                           checked={selectedTenants.includes(t.id)}
-                           onChange={(e) => {
-                             if (e.target.checked) setSelectedTenants([...selectedTenants, t.id]);
-                             else setSelectedTenants(selectedTenants.filter((id) => id !== t.id));
-                           }}
-                           style={{ cursor: 'pointer' }}
-                         />
-                         <label htmlFor={`tenant_${t.id}`} style={{ margin: 0, fontSize: '0.875rem', cursor: 'pointer' }}>{t.name}</label>
-                      </div>
-                   ))}
-                   {tenants.length === 0 && (
-                     <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>No active tenants found.</span>
-                   )}
+                <div style={{ padding: '1rem', border: '1px solid var(--border-light)', borderRadius: 'var(--radius-md)', background: 'rgba(255,255,255,0.02)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.85rem' }}>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                      {selectedTenants.length} of {tenants.length} tenant(s) selected
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => setSelectedTenants(sortedTenants.map((tenant) => tenant.id))}
+                        disabled={sortedTenants.length === 0 || selectedTenants.length === sortedTenants.length}
+                        style={{ height: '36px', padding: '0 0.9rem' }}
+                      >
+                        Select All
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => setSelectedTenants([])}
+                        disabled={selectedTenants.length === 0}
+                        style={{ height: '36px', padding: '0 0.9rem' }}
+                      >
+                        Clear All
+                      </Button>
+                    </div>
+                  </div>
+                  <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: '0.75rem' }}>
+                    {sortedTenants.map((t) => (
+                        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                           <input
+                             type="checkbox"
+                             id={`tenant_${t.id}`}
+                             checked={selectedTenants.includes(t.id)}
+                             onChange={(e) => {
+                               if (e.target.checked) setSelectedTenants([...selectedTenants, t.id]);
+                               else setSelectedTenants(selectedTenants.filter((id) => id !== t.id));
+                             }}
+                             style={{ cursor: 'pointer' }}
+                           />
+                           <label htmlFor={`tenant_${t.id}`} style={{ margin: 0, fontSize: '0.875rem', cursor: 'pointer' }}>{t.name}</label>
+                        </div>
+                    ))}
+                    {sortedTenants.length === 0 && (
+                      <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>No active tenants found.</span>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -554,12 +608,12 @@ export const Expenses = () => {
 
       <Card style={{ overflowX: 'auto' }}>
         <div style={{ marginBottom: '1rem' }}>
-          <h2 style={{ marginBottom: '0.35rem' }}>Expenses For {format(selectedMonthStart, 'MMMM yyyy')}</h2>
-          <p style={{ color: 'var(--text-secondary)' }}>Latest expense records for the selected month.</p>
+          <h2 style={{ marginBottom: '0.35rem' }}>Expenses For {selectedMonthLabel}</h2>
+          <p style={{ color: 'var(--text-secondary)' }}>{isAllMonths ? 'Showing every recorded expense entry.' : 'Latest expense records for the selected month.'}</p>
         </div>
         {monthlyExpenses.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '1rem 0', color: 'var(--text-secondary)' }}>
-            No expense entries were recorded for this month.
+            {isAllMonths ? 'No expense entries were recorded yet.' : 'No expense entries were recorded for this month.'}
           </div>
         ) : (
           <div style={{ minWidth: '720px' }}>

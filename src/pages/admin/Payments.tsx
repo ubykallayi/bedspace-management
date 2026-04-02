@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { format, lastDayOfMonth, startOfMonth } from 'date-fns';
-import { CheckCircle2, Download, MessageCircle, Pencil, ReceiptText, Search, Trash2 } from 'lucide-react';
+import { CheckCircle2, Download, MessageCircle, Pencil, PlusCircle, ReceiptText, Search, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -28,7 +28,7 @@ import {
 } from '../../lib/receipts';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
-import { supabase } from '../../lib/supabase';
+import { supabase, withSupabaseTimeout } from '../../lib/supabase';
 
 type RoomRecord = {
   id: string;
@@ -76,12 +76,18 @@ type PaymentRecord = {
 };
 
 type ChargeRecord = {
+  id?: string;
   tenant_id: string;
   billing_month: string;
   amount: number | string;
+  expense_id?: string | null;
   expenses?: {
+    expense_date?: string | null;
+    category?: string | null;
     description?: string | null;
   } | Array<{
+    expense_date?: string | null;
+    category?: string | null;
     description?: string | null;
   }> | null;
 };
@@ -90,6 +96,18 @@ const getChargeDescription = (charge: ChargeRecord) => (
   Array.isArray(charge.expenses)
     ? charge.expenses[0]?.description
     : charge.expenses?.description
+);
+
+const getChargeCategory = (charge: ChargeRecord) => (
+  Array.isArray(charge.expenses)
+    ? charge.expenses[0]?.category
+    : charge.expenses?.category
+);
+
+const getChargeExpenseDate = (charge: ChargeRecord) => (
+  Array.isArray(charge.expenses)
+    ? charge.expenses[0]?.expense_date
+    : charge.expenses?.expense_date
 );
 
 const getCurrentBillingMonth = () => getMonthStartKey(new Date());
@@ -111,8 +129,11 @@ export const Payments = () => {
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
   const [showForm, setShowForm] = useState(false);
+  const [showChargeForm, setShowChargeForm] = useState(false);
   const [formError, setFormError] = useState('');
+  const [chargeFormError, setChargeFormError] = useState('');
   const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null);
+  const [editingManualChargeId, setEditingManualChargeId] = useState<string | null>(null);
   const [paymentSchemaSupportsAudit, setPaymentSchemaSupportsAudit] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [monthFilter, setMonthFilter] = useState(getMonthInputValue(new Date()));
@@ -121,8 +142,20 @@ export const Payments = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [alerts, setAlerts] = useState<AdminAlertsData>({ unpaidTenants: [], expiringTenants: [] });
   const [pendingDeletePaymentId, setPendingDeletePaymentId] = useState<string | null>(null);
+  const [pendingDeleteManualChargeId, setPendingDeleteManualChargeId] = useState<string | null>(null);
   const formCardRef = useRef<HTMLDivElement | null>(null);
+  const chargeFormCardRef = useRef<HTMLDivElement | null>(null);
   const [allCharges, setAllCharges] = useState<{tenant_id: string; billing_month: string; amount: number; description: string}[]>([]);
+  const [manualCharges, setManualCharges] = useState<Array<{
+    id: string;
+    expense_id?: string | null;
+    tenant_id: string;
+    billing_month: string;
+    amount: number;
+    description: string;
+    expense_date: string;
+    tenant: TenantSummary | null;
+  }>>([]);
   const [waivedSet, setWaivedSet] = useState<Set<string>>(new Set());
 
   const [formData, setFormData] = useState({
@@ -132,6 +165,13 @@ export const Payments = () => {
     billing_month: getCurrentBillingMonth(),
     status: 'paid' as 'paid' | 'pending',
     is_balance_waived: false,
+  });
+  const [chargeFormData, setChargeFormData] = useState({
+    tenant_id: '',
+    description: '',
+    amount: '',
+    billing_month: getCurrentBillingMonth(),
+    charge_date: new Date().toISOString().split('T')[0],
   });
 
   const attachTenantDisplayData = (
@@ -176,170 +216,201 @@ export const Payments = () => {
     }
     setFetchError('');
 
-    let paymentRows: PaymentRecord[] = [];
-    let paymentAuditEnabled = true;
+    try {
+      let paymentRows: PaymentRecord[] = [];
+      let paymentAuditEnabled = true;
 
-    let tenantRows:
-      | Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>
-      | null = null;
-    let tenantErrorMessage = '';
+      let tenantRows:
+        | Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>
+        | null = null;
+      let tenantErrorMessage = '';
 
-    const tenantQueries = [
-      ENHANCED_TENANT_SELECT,
-      LEGACY_ENHANCED_TENANT_SELECT,
-      BASE_TENANT_SELECT,
-      LEGACY_TENANT_SELECT,
-    ] as const;
+      const tenantQueries = [
+        ENHANCED_TENANT_SELECT,
+        LEGACY_ENHANCED_TENANT_SELECT,
+        BASE_TENANT_SELECT,
+        LEGACY_TENANT_SELECT,
+      ] as const;
 
-    for (const tenantSelect of tenantQueries) {
-      const tenantResult = await supabase
-        .from('tenants')
-        .select(tenantSelect)
-        .eq('property_id', selectedPropertyId)
-        .order('start_date', { ascending: false });
+      for (const tenantSelect of tenantQueries) {
+        const tenantResult = await withSupabaseTimeout(
+          supabase
+            .from('tenants')
+            .select(tenantSelect)
+            .eq('property_id', selectedPropertyId)
+            .order('start_date', { ascending: false }),
+          'Tenants took too long to load. Please try again.',
+        );
 
-      if (!tenantResult.error) {
-        tenantRows = (tenantResult.data ?? []) as unknown as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>;
-        break;
-      }
-
-      if (!isMissingColumnError(tenantResult.error)) {
-        tenantErrorMessage = tenantResult.error.message || 'Unable to load tenants.';
-        break;
-      }
-    }
-
-    const [
-      { data: bedRows, error: bedError },
-      { data: roomRows, error: roomError },
-    ] = await Promise.all([
-      supabase.from('beds').select('id, bed_number, room_id, property_id').eq('property_id', selectedPropertyId),
-      supabase.from('rooms').select('id, name').eq('property_id', selectedPropertyId),
-    ]);
-
-    if (tenantErrorMessage) {
-      console.error('Tenant fetch error:', tenantErrorMessage);
-      setFetchError((current) => current || tenantErrorMessage);
-    }
-    if (bedError) {
-      console.error('Bed fetch error:', bedError);
-      setFetchError((current) => current || bedError.message || 'Unable to load beds.');
-    }
-    if (roomError) {
-      console.error('Room fetch error:', roomError);
-      setFetchError((current) => current || roomError.message || 'Unable to load rooms.');
-    }
-
-    const enhancedTenants = attachTenantDisplayData(
-      (tenantRows ?? []) as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>,
-      (bedRows ?? []) as BedRecord[],
-      (roomRows ?? []) as RoomRecord[],
-    );
-    const tenantFileResult = await supabase
-      .from('tenants')
-      .select('id, photo_url')
-      .eq('property_id', selectedPropertyId);
-    if (!tenantFileResult.error) {
-      const fileMap = new Map(
-        ((tenantFileResult.data ?? []) as Array<{ id: string; photo_url?: string | null }>)
-          .map((row) => [row.id, row.photo_url ?? null]),
-      );
-      enhancedTenants.forEach((tenant) => {
-        tenant.photo_url = fileMap.get(tenant.id) ?? null;
-      });
-    }
-
-    const propertyTenantIds = enhancedTenants.map((tenant) => tenant.id);
-    if (propertyTenantIds.length > 0) {
-      const enhancedPayments = await supabase
-        .from('payments')
-        .select(ENHANCED_PAYMENT_SELECT)
-        .in('tenant_id', propertyTenantIds)
-        .order('payment_date', { ascending: false });
-
-      if (enhancedPayments.error) {
-        if (isMissingColumnError(enhancedPayments.error)) {
-          paymentAuditEnabled = false;
-          const fallbackPayments = await supabase
-            .from('payments')
-            .select(BASE_PAYMENT_SELECT)
-            .in('tenant_id', propertyTenantIds)
-            .order('payment_date', { ascending: false });
-
-          if (fallbackPayments.error) {
-            console.error('Payment fetch error:', fallbackPayments.error);
-            setFetchError((current) => current || fallbackPayments.error.message || 'Unable to load payment records.');
-          } else {
-            paymentRows = (fallbackPayments.data ?? []) as PaymentRecord[];
-          }
-        } else {
-          console.error('Payment fetch error:', enhancedPayments.error);
-          setFetchError((current) => current || enhancedPayments.error.message || 'Unable to load payment records.');
+        if (!tenantResult.error) {
+          tenantRows = (tenantResult.data ?? []) as unknown as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>;
+          break;
         }
-      } else {
-        paymentRows = (enhancedPayments.data ?? []) as PaymentRecord[];
-      }
-    }
 
-    const paidTotals = new Map<string, number>();
-    const waivedCycles = new Set<string>();
-    paymentRows.forEach((payment) => {
-      if (payment.status !== 'paid') return;
-      const key = `${payment.tenant_id}:${payment.billing_month}`;
-      paidTotals.set(key, (paidTotals.get(key) ?? 0) + Number(payment.amount));
-      if (payment.is_balance_waived) {
-        waivedCycles.add(key);
+        if (!isMissingColumnError(tenantResult.error)) {
+          tenantErrorMessage = tenantResult.error.message || 'Unable to load tenants.';
+          break;
+        }
       }
-    });
 
-    const chargesTotals = new Map<string, number>();
-    const chargesArray: ChargeRecord[] = [];
-    if (propertyTenantIds.length > 0) {
-      const { data: charges } = await supabase
-        .from('tenant_charges')
-        .select(`tenant_id, billing_month, amount, expenses ( description )`)
-        .in('tenant_id', propertyTenantIds);
-      if (charges) {
-        chargesArray.push(...charges);
-        charges.forEach((charge) => {
-          const key = `${charge.tenant_id}:${charge.billing_month}`;
-          chargesTotals.set(key, (chargesTotals.get(key) ?? 0) + Number(charge.amount));
+      const [
+        { data: bedRows, error: bedError },
+        { data: roomRows, error: roomError },
+      ] = await withSupabaseTimeout(
+        Promise.all([
+          supabase.from('beds').select('id, bed_number, room_id, property_id').eq('property_id', selectedPropertyId),
+          supabase.from('rooms').select('id, name').eq('property_id', selectedPropertyId),
+        ]),
+        'Beds and rooms took too long to load. Please try again.',
+      );
+
+      if (tenantErrorMessage) {
+        console.error('Tenant fetch error:', tenantErrorMessage);
+        setFetchError((current) => current || tenantErrorMessage);
+      }
+      if (bedError) {
+        console.error('Bed fetch error:', bedError);
+        setFetchError((current) => current || bedError.message || 'Unable to load beds.');
+      }
+      if (roomError) {
+        console.error('Room fetch error:', roomError);
+        setFetchError((current) => current || roomError.message || 'Unable to load rooms.');
+      }
+
+      const enhancedTenants = attachTenantDisplayData(
+        (tenantRows ?? []) as Array<{ id: string; name: string; email?: string; phone?: string; bed_id: string; rent_amount: number | string; prorated_rent?: number | string | null; start_date: string; end_date: string | null; is_active?: boolean }>,
+        (bedRows ?? []) as BedRecord[],
+        (roomRows ?? []) as RoomRecord[],
+      );
+      const tenantFileResult = await withSupabaseTimeout(
+        supabase
+          .from('tenants')
+          .select('id, photo_url')
+          .eq('property_id', selectedPropertyId),
+        'Tenant photos took too long to load. Please try again.',
+      );
+      if (!tenantFileResult.error) {
+        const fileMap = new Map(
+          ((tenantFileResult.data ?? []) as Array<{ id: string; photo_url?: string | null }>)
+            .map((row) => [row.id, row.photo_url ?? null]),
+        );
+        enhancedTenants.forEach((tenant) => {
+          tenant.photo_url = fileMap.get(tenant.id) ?? null;
         });
       }
+
+      const propertyTenantIds = enhancedTenants.map((tenant) => tenant.id);
+      if (propertyTenantIds.length > 0) {
+        const enhancedPayments = await withSupabaseTimeout(
+          supabase
+            .from('payments')
+            .select(ENHANCED_PAYMENT_SELECT)
+            .in('tenant_id', propertyTenantIds)
+            .order('payment_date', { ascending: false }),
+          'Payments took too long to load. Please try again.',
+        );
+
+        if (enhancedPayments.error) {
+          if (isMissingColumnError(enhancedPayments.error)) {
+            paymentAuditEnabled = false;
+            const fallbackPayments = await withSupabaseTimeout(
+              supabase
+                .from('payments')
+                .select(BASE_PAYMENT_SELECT)
+                .in('tenant_id', propertyTenantIds)
+                .order('payment_date', { ascending: false }),
+              'Payments took too long to load. Please try again.',
+            );
+
+            if (fallbackPayments.error) {
+              console.error('Payment fetch error:', fallbackPayments.error);
+              setFetchError((current) => current || fallbackPayments.error.message || 'Unable to load payment records.');
+            } else {
+              paymentRows = (fallbackPayments.data ?? []) as PaymentRecord[];
+            }
+          } else {
+            console.error('Payment fetch error:', enhancedPayments.error);
+            setFetchError((current) => current || enhancedPayments.error.message || 'Unable to load payment records.');
+          }
+        } else {
+          paymentRows = (enhancedPayments.data ?? []) as PaymentRecord[];
+        }
+      }
+
+      const waivedCycles = new Set<string>();
+      paymentRows.forEach((payment) => {
+        if (payment.status !== 'paid') return;
+        if (payment.is_balance_waived) {
+          waivedCycles.add(`${payment.tenant_id}:${payment.billing_month}`);
+        }
+      });
+
+      const chargesArray: ChargeRecord[] = [];
+      if (propertyTenantIds.length > 0) {
+        const { data: charges } = await withSupabaseTimeout(
+          supabase
+            .from('tenant_charges')
+            .select(`id, tenant_id, billing_month, amount, expense_id, expenses ( description, expense_date, category )`)
+            .in('tenant_id', propertyTenantIds),
+          'Extra charges took too long to load. Please try again.',
+        );
+        if (charges) {
+          chargesArray.push(...charges);
+        }
+      }
+
+      const enhancedPaymentsWithStatus = paymentRows.map((payment) => {
+        const tenant = enhancedTenants.find((item) => item.id === payment.tenant_id) ?? null;
+        const cycleSummary = tenant
+          ? calculateTenantBalanceForMonth(tenant, payment.billing_month, paymentRows, chargesArray)
+          : null;
+
+        return {
+          ...payment,
+          tenant,
+          cycleDue: cycleSummary?.dueAmount ?? 0,
+          cyclePaid: cycleSummary?.paidAmount ?? 0,
+          cycleStatus: cycleSummary?.status ?? 'unpaid',
+        };
+      });
+
+      setAllCharges(chargesArray.map((c) => ({ 
+        tenant_id: c.tenant_id, 
+        billing_month: c.billing_month, 
+        amount: Number(c.amount),
+        description: getChargeDescription(c) || 'Extra Charge'
+      })));
+      setManualCharges(
+        chargesArray
+          .filter((charge: ChargeRecord) => getChargeCategory(charge) === 'Manual Charge')
+          .map((charge: ChargeRecord) => ({
+            id: charge.id ?? `${charge.tenant_id}-${charge.billing_month}-${charge.amount}`,
+            expense_id: charge.expense_id ?? null,
+            tenant_id: charge.tenant_id,
+            billing_month: charge.billing_month,
+            amount: Number(charge.amount),
+            description: getChargeDescription(charge) || 'Manual Charge',
+            expense_date: getChargeExpenseDate(charge) || charge.billing_month,
+            tenant: enhancedTenants.find((tenant) => tenant.id === charge.tenant_id) ?? null,
+          }))
+          .sort((left, right) => right.expense_date.localeCompare(left.expense_date)),
+      );
+      setWaivedSet(waivedCycles);
+
+      setPaymentSchemaSupportsAudit(paymentAuditEnabled);
+      setTenants(enhancedTenants);
+      setPayments(enhancedPaymentsWithStatus);
+      setCachedAdminData(cacheKey, {
+        payments: enhancedPaymentsWithStatus,
+        tenants: enhancedTenants,
+        paymentSchemaSupportsAudit: paymentAuditEnabled,
+      });
+    } catch (nextError) {
+      console.error('Payments fetch crash:', nextError);
+      setFetchError(nextError instanceof Error ? nextError.message : 'Unable to load payment records.');
+    } finally {
+      setLoading(false);
     }
-
-    const enhancedPaymentsWithStatus = paymentRows.map((payment) => {
-      const tenant = enhancedTenants.find((item) => item.id === payment.tenant_id) ?? null;
-      const cycleSummary = tenant
-        ? calculateTenantBalanceForMonth(tenant, payment.billing_month, paymentRows, chargesArray)
-        : null;
-
-      return {
-        ...payment,
-        tenant,
-        cycleDue: cycleSummary?.dueAmount ?? 0,
-        cyclePaid: cycleSummary?.paidAmount ?? 0,
-        cycleStatus: cycleSummary?.status ?? 'unpaid',
-      };
-    });
-
-    setAllCharges(chargesArray.map((c) => ({ 
-      tenant_id: c.tenant_id, 
-      billing_month: c.billing_month, 
-      amount: Number(c.amount),
-      description: getChargeDescription(c) || 'Extra Charge'
-    })));
-    setWaivedSet(waivedCycles);
-
-    setPaymentSchemaSupportsAudit(paymentAuditEnabled);
-    setTenants(enhancedTenants);
-    setPayments(enhancedPaymentsWithStatus);
-    setCachedAdminData(cacheKey, {
-      payments: enhancedPaymentsWithStatus,
-      tenants: enhancedTenants,
-      paymentSchemaSupportsAudit: paymentAuditEnabled,
-    });
-    setLoading(false);
   }, [selectedPropertyId]);
 
   const buildReceiptData = useCallback((payment: {
@@ -483,6 +554,116 @@ export const Payments = () => {
     });
   };
 
+  const handleRecordManualCharge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setChargeFormError('');
+
+    if (!selectedPropertyId) {
+      setChargeFormError('Please select a property before recording a manual charge.');
+      return;
+    }
+
+    if (!chargeFormData.tenant_id) {
+      setChargeFormError('Please select a tenant.');
+      return;
+    }
+
+    if (!chargeFormData.description.trim()) {
+      setChargeFormError('Please enter a charge description.');
+      return;
+    }
+
+    const parsedAmount = Number(chargeFormData.amount);
+    if (Number.isNaN(parsedAmount) || parsedAmount <= 0) {
+      setChargeFormError('Please enter a valid charge amount.');
+      return;
+    }
+
+    let savedExpenseId = editingManualChargeId
+      ? manualCharges.find((charge) => charge.id === editingManualChargeId)?.expense_id ?? null
+      : null;
+
+    if (editingManualChargeId && savedExpenseId) {
+      const { error: expenseUpdateError } = await supabase
+        .from('expenses')
+        .update({
+          description: chargeFormData.description.trim(),
+          amount: parsedAmount,
+          expense_date: chargeFormData.charge_date,
+          category: 'Manual Charge',
+        })
+        .eq('id', savedExpenseId);
+
+      if (expenseUpdateError) {
+        console.error('Manual charge expense update error:', expenseUpdateError);
+        setChargeFormError(expenseUpdateError.message || 'Unable to update the manual charge.');
+        return;
+      }
+    } else {
+      const { data: savedExpense, error: expenseError } = await supabase
+        .from('expenses')
+        .insert([{
+          description: chargeFormData.description.trim(),
+          amount: parsedAmount,
+          expense_date: chargeFormData.charge_date,
+          category: 'Manual Charge',
+        }])
+        .select('id')
+        .single();
+
+      if (expenseError) {
+        console.error('Manual charge expense insert error:', expenseError);
+        setChargeFormError(expenseError.message || 'Unable to save the manual charge.');
+        return;
+      }
+
+      savedExpenseId = savedExpense.id;
+    }
+
+    const chargePayload = {
+      tenant_id: chargeFormData.tenant_id,
+      expense_id: savedExpenseId,
+      amount: parsedAmount,
+      billing_month: chargeFormData.billing_month,
+    };
+
+    const { error: chargeError } = editingManualChargeId
+      ? await supabase
+        .from('tenant_charges')
+        .update(chargePayload)
+        .eq('id', editingManualChargeId)
+      : await supabase
+        .from('tenant_charges')
+        .insert([chargePayload]);
+
+    if (chargeError) {
+      console.error('Manual tenant charge insert error:', chargeError);
+      setChargeFormError(chargeError.message || 'Unable to attach the manual charge to the tenant.');
+      return;
+    }
+
+    const selectedTenant = tenants.find((tenant) => tenant.id === chargeFormData.tenant_id);
+    await writeActivityLog({
+      action: editingManualChargeId ? 'tenant_charge.updated' : 'tenant_charge.created',
+      entityType: 'tenant_charge',
+      entityId: editingManualChargeId ?? savedExpenseId ?? '',
+      description: `${editingManualChargeId ? 'Updated' : 'Recorded'} manual charge "${chargeFormData.description.trim()}" for ${selectedTenant?.name ?? 'tenant'} for ${format(new Date(chargeFormData.billing_month), 'MMM yyyy')}.`,
+      actorId: user?.id,
+    });
+
+    invalidateAdminDataCache();
+    await fetchData();
+    setShowChargeForm(false);
+    setEditingManualChargeId(null);
+    setChargeFormData({
+      tenant_id: '',
+      description: '',
+      amount: '',
+      billing_month: getCurrentBillingMonth(),
+      charge_date: new Date().toISOString().split('T')[0],
+    });
+  };
+
   const handleTenantSelect = (id: string) => {
     const tenant = tenants.find((item) => item.id === id);
     if (!tenant) return;
@@ -538,6 +719,81 @@ export const Payments = () => {
     });
   };
 
+  const handleEditManualCharge = (charge: {
+    id: string;
+    tenant_id: string;
+    billing_month: string;
+    amount: number;
+    description: string;
+    expense_date: string;
+  }) => {
+    setEditingManualChargeId(charge.id);
+    setShowChargeForm(true);
+    setShowForm(false);
+    setChargeFormError('');
+    setChargeFormData({
+      tenant_id: charge.tenant_id,
+      description: charge.description,
+      amount: String(charge.amount),
+      billing_month: charge.billing_month,
+      charge_date: charge.expense_date,
+    });
+    window.requestAnimationFrame(() => {
+      chargeFormCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  };
+
+  const handleDeleteManualCharge = async (chargeId: string) => {
+    const charge = manualCharges.find((item) => item.id === chargeId);
+    if (!charge) return;
+
+    const { error: tenantChargeDeleteError } = await supabase
+      .from('tenant_charges')
+      .delete()
+      .eq('id', chargeId);
+
+    if (tenantChargeDeleteError) {
+      console.error('Manual charge delete error:', tenantChargeDeleteError);
+      setChargeFormError(tenantChargeDeleteError.message || 'Unable to delete the manual charge.');
+      return;
+    }
+
+    if (charge.expense_id) {
+      const { error: expenseDeleteError } = await supabase
+        .from('expenses')
+        .delete()
+        .eq('id', charge.expense_id);
+
+      if (expenseDeleteError) {
+        console.error('Manual charge expense delete error:', expenseDeleteError);
+        setChargeFormError(expenseDeleteError.message || 'Manual charge was removed from tenant balance, but the linked expense could not be deleted.');
+        return;
+      }
+    }
+
+    await writeActivityLog({
+      action: 'tenant_charge.deleted',
+      entityType: 'tenant_charge',
+      entityId: chargeId,
+      description: `Deleted manual charge "${charge.description}" for ${charge.tenant?.name ?? 'tenant'}.`,
+      actorId: user?.id,
+    });
+
+    invalidateAdminDataCache();
+    if (editingManualChargeId === chargeId) {
+      setEditingManualChargeId(null);
+      setShowChargeForm(false);
+      setChargeFormData({
+        tenant_id: '',
+        description: '',
+        amount: '',
+        billing_month: getCurrentBillingMonth(),
+        charge_date: new Date().toISOString().split('T')[0],
+      });
+    }
+    await fetchData();
+  };
+
   const handleDeletePayment = async (paymentId: string) => {
     const payment = payments.find((item) => item.id === paymentId);
     const { error } = await supabase.from('payments').delete().eq('id', paymentId);
@@ -572,17 +828,25 @@ export const Payments = () => {
     await fetchData();
   };
 
-  const selectedMonthStart = useMemo(() => startOfMonth(new Date(`${monthFilter}-01`)), [monthFilter]);
-  const selectedMonthEnd = useMemo(() => lastDayOfMonth(selectedMonthStart), [selectedMonthStart]);
-  const selectedBillingMonth = useMemo(() => format(selectedMonthStart, 'yyyy-MM-dd'), [selectedMonthStart]);
+  const isAllMonths = monthFilter.trim().length === 0;
+  const effectiveMonthStart = useMemo(() => (
+    isAllMonths ? startOfMonth(new Date()) : startOfMonth(new Date(`${monthFilter}-01`))
+  ), [isAllMonths, monthFilter]);
+  const effectiveMonthEnd = useMemo(() => lastDayOfMonth(effectiveMonthStart), [effectiveMonthStart]);
+  const selectedBillingMonth = useMemo(() => format(effectiveMonthStart, 'yyyy-MM-dd'), [effectiveMonthStart]);
+  const selectedMonthLabel = isAllMonths ? 'All Months' : format(effectiveMonthStart, 'MMMM yyyy');
 
   const activeTenantsForMonth = useMemo(() => (
+    isAllMonths
+      ? []
+      : (
     tenants.filter((tenant) => (
       tenant.is_active !== false &&
-      tenant.start_date <= format(selectedMonthEnd, 'yyyy-MM-dd') &&
-      (!tenant.end_date || tenant.end_date >= format(selectedMonthStart, 'yyyy-MM-dd'))
+      tenant.start_date <= format(effectiveMonthEnd, 'yyyy-MM-dd') &&
+      (!tenant.end_date || tenant.end_date >= format(effectiveMonthStart, 'yyyy-MM-dd'))
     ))
-  ), [selectedMonthEnd, selectedMonthStart, tenants]);
+      )
+  ), [effectiveMonthEnd, effectiveMonthStart, isAllMonths, tenants]);
 
   const monthlyTenantStatuses = useMemo(() => {
     return activeTenantsForMonth.map((tenant) => {
@@ -611,16 +875,60 @@ export const Payments = () => {
       const matchesSearch = normalizedSearch.length === 0 || [
         payment.tenant?.name ?? '',
         payment.tenant?.email ?? '',
+        payment.tenant?.phone ?? '',
         payment.tenant?.room?.name ?? '',
         payment.tenant?.bed?.bed_number ?? '',
+        format(new Date(payment.billing_month), 'MMM yyyy'),
+        format(new Date(payment.payment_date), 'MMM dd, yyyy'),
       ].some((value) => value.toLowerCase().includes(normalizedSearch));
-      const matchesMonth = payment.billing_month === selectedBillingMonth;
+      const matchesMonth = isAllMonths || payment.billing_month === selectedBillingMonth;
       const matchesCycleStatus = cycleStatusFilter === 'all' || payment.cycleStatus === cycleStatusFilter;
       const matchesTenant = tenantFilter === 'all' || payment.tenant_id === tenantFilter;
 
       return matchesSearch && matchesMonth && matchesCycleStatus && matchesTenant;
     });
-  }, [cycleStatusFilter, payments, searchQuery, selectedBillingMonth, tenantFilter]);
+  }, [cycleStatusFilter, isAllMonths, payments, searchQuery, selectedBillingMonth, tenantFilter]);
+
+  const filteredMonthlyTenantStatuses = useMemo(() => {
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+
+    return monthlyTenantStatuses.filter((tenant) => {
+      const matchesSearch = normalizedSearch.length === 0 || [
+        tenant.name,
+        tenant.email ?? '',
+        tenant.phone ?? '',
+        tenant.room?.name ?? '',
+        tenant.bed?.bed_number ?? '',
+      ].some((value) => value.toLowerCase().includes(normalizedSearch));
+      const matchesCycleStatus = cycleStatusFilter === 'all' || tenant.cycleStatus === cycleStatusFilter;
+      const matchesTenant = tenantFilter === 'all' || tenant.id === tenantFilter;
+
+      return matchesSearch && matchesCycleStatus && matchesTenant;
+    });
+  }, [cycleStatusFilter, monthlyTenantStatuses, searchQuery, tenantFilter]);
+  const sortedTenants = useMemo(() => (
+    [...tenants].sort((left, right) => left.name.localeCompare(right.name))
+  ), [tenants]);
+  const filteredManualCharges = useMemo(() => {
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+
+    return manualCharges.filter((charge) => {
+      const matchesSearch = normalizedSearch.length === 0 || [
+        charge.tenant?.name ?? '',
+        charge.tenant?.email ?? '',
+        charge.tenant?.phone ?? '',
+        charge.tenant?.room?.name ?? '',
+        charge.tenant?.bed?.bed_number ?? '',
+        charge.description,
+        format(new Date(charge.billing_month), 'MMM yyyy'),
+        format(new Date(charge.expense_date), 'MMM dd, yyyy'),
+      ].some((value) => value.toLowerCase().includes(normalizedSearch));
+      const matchesMonth = isAllMonths || charge.billing_month === selectedBillingMonth;
+      const matchesTenant = tenantFilter === 'all' || charge.tenant_id === tenantFilter;
+
+      return matchesSearch && matchesMonth && matchesTenant;
+    });
+  }, [isAllMonths, manualCharges, searchQuery, selectedBillingMonth, tenantFilter]);
 
   const selectedTenant = tenants.find((tenant) => tenant.id === formData.tenant_id) ?? null;
   const collectedThisMonth = monthlyTenantStatuses.reduce((sum, tenant) => sum + tenant.paid, 0);
@@ -631,7 +939,7 @@ export const Payments = () => {
 
   const exportPaymentsCsv = () => {
     downloadCsv(
-      `payments-${selectedBillingMonth}.csv`,
+      `payments-${isAllMonths ? 'all' : selectedBillingMonth}.csv`,
       ['Tenant', 'Email', 'Room', 'Bed', 'Billing Month', 'Payment Date', 'Amount', 'Cycle Status', 'Record Status'],
       filteredPayments.map((payment) => [
         payment.tenant?.name ?? 'Unknown tenant',
@@ -648,7 +956,7 @@ export const Payments = () => {
   };
 
   const exportUnpaidCsv = () => {
-    const rows = monthlyTenantStatuses
+    const rows = filteredMonthlyTenantStatuses
       .filter((tenant) => tenant.remaining > 0)
       .map((tenant) => [
         tenant.name,
@@ -663,7 +971,7 @@ export const Payments = () => {
       ]);
 
     downloadCsv(
-      `unpaid-tenants-${selectedBillingMonth}.csv`,
+      `unpaid-tenants-${isAllMonths ? 'all' : selectedBillingMonth}.csv`,
       ['Tenant', 'Email', 'Room', 'Bed', 'Billing Month', 'Due', 'Paid', 'Remaining', 'Status'],
       rows,
     );
@@ -762,6 +1070,9 @@ export const Payments = () => {
               onChange={(e) => setMonthFilter(e.target.value)}
             />
           </div>
+          <Button variant={isAllMonths ? 'primary' : 'secondary'} onClick={() => setMonthFilter('')}>
+            All
+          </Button>
           <Button
             variant="secondary"
             onClick={() => setShowFilters((value) => !value)}
@@ -782,7 +1093,40 @@ export const Payments = () => {
               { label: 'Export Unpaid', onClick: exportUnpaidCsv },
             ]}
           />
-          <Button onClick={() => setShowForm(!showForm)}>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setShowChargeForm((value) => {
+                const nextValue = !value;
+                if (nextValue) {
+                  window.requestAnimationFrame(() => {
+                    chargeFormCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  });
+                }
+                return nextValue;
+              });
+              setShowForm(false);
+              setEditingPaymentId(null);
+              if (showChargeForm) {
+                setEditingManualChargeId(null);
+                setChargeFormData({
+                  tenant_id: '',
+                  description: '',
+                  amount: '',
+                  billing_month: getCurrentBillingMonth(),
+                  charge_date: new Date().toISOString().split('T')[0],
+                });
+              }
+              setChargeFormError('');
+            }}
+            style={{ borderColor: 'rgba(245, 158, 11, 0.35)', color: 'var(--warning)' }}
+          >
+            <PlusCircle size={16} /> Manual Charge
+          </Button>
+          <Button onClick={() => {
+            setShowForm((value) => !value);
+            setShowChargeForm(false);
+          }}>
             {showForm ? 'Cancel' : 'Record Payment'}
           </Button>
         </div>
@@ -815,19 +1159,23 @@ export const Payments = () => {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
         <Card>
           <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Collected</div>
-          <h2 style={{ marginTop: '0.5rem' }}>{formatCurrency(collectedThisMonth)}</h2>
+          <h2 style={{ marginTop: '0.5rem' }}>{formatCurrency(isAllMonths ? filteredPayments.reduce((sum, payment) => sum + Number(payment.amount), 0) : collectedThisMonth)}</h2>
         </Card>
         <Card>
-          <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Expected</div>
-          <h2 style={{ marginTop: '0.5rem' }}>{formatCurrency(expectedThisMonth)}</h2>
+          <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>{isAllMonths ? 'Transactions' : 'Expected'}</div>
+          <h2 style={{ marginTop: '0.5rem' }}>{isAllMonths ? filteredPayments.length : formatCurrency(expectedThisMonth)}</h2>
         </Card>
         <Card>
-          <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Remaining</div>
-          <h2 style={{ marginTop: '0.5rem', color: 'var(--warning)' }}>{formatCurrency(remainingThisMonth)}</h2>
+          <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>{isAllMonths ? 'Pending Records' : 'Remaining'}</div>
+          <h2 style={{ marginTop: '0.5rem', color: 'var(--warning)' }}>
+            {isAllMonths ? filteredPayments.filter((payment) => payment.status === 'pending').length : formatCurrency(remainingThisMonth)}
+          </h2>
         </Card>
         <Card>
-          <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Unpaid / Partial</div>
-          <h2 style={{ marginTop: '0.5rem' }}>{unpaidTenantCount} / {partialTenantCount}</h2>
+          <div style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>{isAllMonths ? 'Visible Tenants' : 'Unpaid / Partial'}</div>
+          <h2 style={{ marginTop: '0.5rem' }}>
+            {isAllMonths ? new Set(filteredPayments.map((payment) => payment.tenant_id)).size : `${unpaidTenantCount} / ${partialTenantCount}`}
+          </h2>
         </Card>
       </div>
 
@@ -842,6 +1190,7 @@ export const Payments = () => {
             setSearchQuery('');
             setCycleStatusFilter('all');
             setTenantFilter('all');
+            setShowFilters(false);
           }}>
             Clear Filters
           </Button>
@@ -869,7 +1218,7 @@ export const Payments = () => {
             <label className="form-label">Tenant</label>
             <select className="form-select" value={tenantFilter} onChange={(e) => setTenantFilter(e.target.value)}>
               <option value="all">All tenants</option>
-              {tenants.map((tenant) => (
+              {sortedTenants.map((tenant) => (
                 <option key={tenant.id} value={tenant.id}>{tenant.name}</option>
               ))}
             </select>
@@ -898,7 +1247,7 @@ export const Payments = () => {
               <label className="form-label">Tenant</label>
               <select className="form-select" required value={formData.tenant_id} onChange={(e) => handleTenantSelect(e.target.value)}>
                 <option value="">Select Tenant</option>
-                {tenants.map((tenant) => (
+                {sortedTenants.map((tenant) => (
                   <option key={tenant.id} value={tenant.id}>
                     {tenant.name} | {tenant.room?.name} | Bed {tenant.bed?.bed_number} | Rent {formatCurrency(Number(tenant.rent_amount))}
                   </option>
@@ -992,11 +1341,89 @@ export const Payments = () => {
         </Card>
       )}
 
+      {showChargeForm && (
+        <Card ref={chargeFormCardRef} style={{ marginBottom: '2rem', borderColor: 'rgba(245, 158, 11, 0.45)', background: 'rgba(120, 53, 15, 0.08)' }}>
+          <div style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+            <div>
+              <h3 style={{ marginBottom: '0.25rem' }}>{editingManualChargeId ? 'Edit Manual Charge' : 'Record Manual Charge'}</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                Add opening balances, damages, utility recoveries, or any extra collectible amount for a tenant.
+              </p>
+            </div>
+            <div className="badge badge-warning">
+              Separate From Payments
+            </div>
+          </div>
+          <form onSubmit={handleRecordManualCharge} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', alignItems: 'flex-end' }}>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Tenant</label>
+              <select className="form-select" required value={chargeFormData.tenant_id} onChange={(e) => setChargeFormData({ ...chargeFormData, tenant_id: e.target.value })}>
+                <option value="">Select Tenant</option>
+                {sortedTenants.map((tenant) => (
+                  <option key={tenant.id} value={tenant.id}>
+                    {tenant.name} | {tenant.room?.name} | Bed {tenant.bed?.bed_number}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <Input
+              label="Description"
+              required
+              value={chargeFormData.description}
+              onChange={(e) => setChargeFormData({ ...chargeFormData, description: e.target.value })}
+            />
+
+            <Input
+              type="number"
+              label="Amount (AED)"
+              required
+              value={chargeFormData.amount}
+              onChange={(e) => setChargeFormData({ ...chargeFormData, amount: e.target.value })}
+            />
+
+            <Input
+              type="month"
+              label="Collect In Month"
+              required
+              value={chargeFormData.billing_month.slice(0, 7)}
+              onChange={(e) => setChargeFormData({ ...chargeFormData, billing_month: `${e.target.value}-01` })}
+            />
+
+            <Input
+              type="date"
+              label="Charge Date"
+              required
+              value={chargeFormData.charge_date}
+              onChange={(e) => setChargeFormData({ ...chargeFormData, charge_date: e.target.value })}
+            />
+
+            <div style={{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                This will increase the tenant balance automatically and will stay separate from payment receipts.
+              </div>
+              <Button type="submit" style={{ height: '42px', background: 'linear-gradient(135deg, #f59e0b, #f97316)', color: '#111827' }}>
+                {editingManualChargeId ? 'Update Charge' : 'Save Charge'}
+              </Button>
+            </div>
+          </form>
+
+          {chargeFormError && (
+            <div style={{ color: 'var(--danger)', fontSize: '0.875rem', marginTop: '0.75rem', padding: '0.75rem 1rem', background: 'var(--danger-bg)', borderRadius: 'var(--radius-sm)' }}>
+              {chargeFormError}
+            </div>
+          )}
+        </Card>
+      )}
+
+      {!isAllMonths && (
       <Card style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ marginBottom: '1rem' }}>Unpaid Or Partial For {format(new Date(selectedBillingMonth), 'MMMM yyyy')}</h2>
-        {monthlyTenantStatuses.filter((tenant) => tenant.remaining > 0).length === 0 ? (
+        <h2 style={{ marginBottom: '1rem' }}>Unpaid Or Partial For {selectedMonthLabel}</h2>
+        {filteredMonthlyTenantStatuses.filter((tenant) => tenant.remaining > 0).length === 0 ? (
           <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '1rem 0' }}>
-            Everyone active for this month is fully paid.
+            {searchQuery || tenantFilter !== 'all' || cycleStatusFilter !== 'all'
+              ? 'No unpaid or partial tenants match the active filters.'
+              : 'Everyone active for this month is fully paid.'}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -1019,7 +1446,7 @@ export const Payments = () => {
               <div>Balance</div>
               <div>Status</div>
             </div>
-            {monthlyTenantStatuses.filter((tenant) => tenant.remaining > 0).map((tenant) => (
+            {filteredMonthlyTenantStatuses.filter((tenant) => tenant.remaining > 0).map((tenant) => (
               <div key={tenant.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1.4fr) minmax(180px, 1.1fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(130px, 0.9fr) minmax(130px, 0.9fr)', gap: '1rem', padding: '0.9rem 0', borderBottom: '1px solid rgba(255,255,255,0.06)', alignItems: 'center' }}>
                 <div>
                   <div style={{ fontWeight: 600 }}>{tenant.name}</div>
@@ -1034,6 +1461,73 @@ export const Payments = () => {
                   <span className={`badge ${getPaymentStatusBadgeClass(tenant.cycleStatus)}`}>
                     {getPaymentStatusLabel(tenant.cycleStatus)}
                   </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+      )}
+
+      <Card style={{ marginBottom: '1.5rem', borderColor: 'rgba(245, 158, 11, 0.35)', background: 'rgba(120, 53, 15, 0.06)' }}>
+        <div style={{ marginBottom: '1rem' }}>
+          <h2 style={{ marginBottom: '0.35rem' }}>Manual Charges</h2>
+          <p style={{ color: 'var(--text-secondary)' }}>
+            Opening balances and extra collectible amounts are listed here separately from payment transactions.
+          </p>
+        </div>
+        {filteredManualCharges.length === 0 ? (
+          <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '1rem 0' }}>
+            {searchQuery || tenantFilter !== 'all' || !isAllMonths
+              ? 'No manual charges match the current view.'
+              : 'No manual charges recorded yet.'}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(220px, 1.3fr) minmax(220px, 1.6fr) minmax(130px, 0.9fr) minmax(120px, 0.9fr) minmax(120px, 0.8fr) auto',
+              gap: '1rem',
+              padding: '0 0 0.5rem',
+              borderBottom: '1px solid var(--border-light)',
+              color: 'var(--text-secondary)',
+              fontSize: '0.8rem',
+              textTransform: 'uppercase',
+              letterSpacing: '0.08em',
+            }}>
+              <div>Tenant</div>
+              <div>Description</div>
+              <div>Collect Month</div>
+              <div>Charge Date</div>
+              <div>Amount</div>
+              <div style={{ textAlign: 'right' }}>Actions</div>
+            </div>
+            {filteredManualCharges.map((charge) => (
+              <div key={charge.id} style={{
+                display: 'grid',
+                gridTemplateColumns: 'minmax(220px, 1.3fr) minmax(220px, 1.6fr) minmax(130px, 0.9fr) minmax(120px, 0.9fr) minmax(120px, 0.8fr) auto',
+                gap: '1rem',
+                padding: '0.9rem 0',
+                borderBottom: '1px solid rgba(255,255,255,0.06)',
+                alignItems: 'center',
+              }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{charge.tenant?.name ?? 'Tenant'}</div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                    {charge.tenant?.room?.name ?? 'Unknown room'} | Bed {charge.tenant?.bed?.bed_number ?? 'Unknown'}
+                  </div>
+                </div>
+                <div style={{ color: 'var(--text-secondary)' }}>{charge.description}</div>
+                <div>{format(new Date(charge.billing_month), 'MMM yyyy')}</div>
+                <div style={{ color: 'var(--text-secondary)' }}>{format(new Date(charge.expense_date), 'MMM dd, yyyy')}</div>
+                <div style={{ color: 'var(--warning)', fontWeight: 700 }}>{formatCurrency(charge.amount)}</div>
+                <div style={{ justifySelf: 'end', display: 'flex', gap: '0.35rem' }}>
+                  <button onClick={() => handleEditManualCharge(charge)} style={{ color: 'var(--secondary)', padding: '0.25rem' }} title="Edit manual charge">
+                    <Pencil size={16} />
+                  </button>
+                  <button onClick={() => setPendingDeleteManualChargeId(charge.id)} style={{ color: 'var(--danger)', padding: '0.25rem' }} title="Delete manual charge">
+                    <Trash2 size={16} />
+                  </button>
                 </div>
               </div>
             ))}
@@ -1106,7 +1600,9 @@ export const Payments = () => {
 
         {filteredPayments.length === 0 && payments.length > 0 && (
           <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-tertiary)' }}>
-            No payment records match the selected month or filters.
+            {searchQuery || tenantFilter !== 'all' || cycleStatusFilter !== 'all'
+              ? 'No payment records match the active filters for this month.'
+              : 'No payment records found for the selected month.'}
           </div>
         )}
 
@@ -1128,6 +1624,19 @@ export const Payments = () => {
           if (!pendingDeletePaymentId) return;
           await handleDeletePayment(pendingDeletePaymentId);
           setPendingDeletePaymentId(null);
+        }}
+      />
+      <ConfirmDialog
+        open={pendingDeleteManualChargeId !== null}
+        title="Delete Manual Charge"
+        message="Delete this manual charge? This action will also remove its linked expense entry."
+        confirmLabel="Delete"
+        tone="danger"
+        onCancel={() => setPendingDeleteManualChargeId(null)}
+        onConfirm={async () => {
+          if (!pendingDeleteManualChargeId) return;
+          await handleDeleteManualCharge(pendingDeleteManualChargeId);
+          setPendingDeleteManualChargeId(null);
         }}
       />
     </div>

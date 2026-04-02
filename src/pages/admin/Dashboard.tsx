@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { addDays, format, lastDayOfMonth, startOfMonth } from 'date-fns';
 import { BedDouble, CheckCircle2, DoorOpen, Download, XCircle } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
+import { Input } from '../../components/ui/Input';
 import { MobileActionMenu } from '../../components/ui/MobileActionMenu';
 import { useAdminProperty } from '../../contexts/AdminPropertyContext';
 import {
   downloadCsv,
   formatCurrency,
+  getMonthInputValue,
   getRentDueForBillingMonth,
   getMonthlyPaymentStatus,
   getPaymentStatusBadgeClass,
@@ -17,7 +19,7 @@ import {
   calculatePreviousBalance,
 } from '../../lib/admin';
 import { getCachedAdminData, setCachedAdminData } from '../../lib/adminDataCache';
-import { supabase } from '../../lib/supabase';
+import { supabase, withSupabaseTimeout } from '../../lib/supabase';
 
 type RoomRecord = {
   id: string;
@@ -72,6 +74,7 @@ const DASHBOARD_CACHE_KEY = 'admin-dashboard';
 
 export const Dashboard = () => {
   const { selectedProperty, selectedPropertyId, isLoading: propertiesLoading, error: propertiesError } = useAdminProperty();
+  const [monthFilter, setMonthFilter] = useState(getMonthInputValue(new Date()));
   const [stats, setStats] = useState({
     rooms: 0,
     totalBeds: 0,
@@ -107,6 +110,10 @@ export const Dashboard = () => {
   }>>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
+  const selectedMonthStart = useMemo(() => startOfMonth(new Date(`${monthFilter}-01`)), [monthFilter]);
+  const selectedMonthEnd = useMemo(() => lastDayOfMonth(selectedMonthStart), [selectedMonthStart]);
+  const selectedBillingMonth = useMemo(() => format(selectedMonthStart, 'yyyy-MM-dd'), [selectedMonthStart]);
+  const selectedMonthLabel = useMemo(() => format(selectedMonthStart, 'MMMM yyyy'), [selectedMonthStart]);
 
   const fetchStats = useCallback(async () => {
     if (!selectedPropertyId) {
@@ -130,7 +137,7 @@ export const Dashboard = () => {
       return;
     }
 
-    const cacheKey = `${DASHBOARD_CACHE_KEY}:${selectedPropertyId}`;
+    const cacheKey = `${DASHBOARD_CACHE_KEY}:${selectedPropertyId}:${selectedBillingMonth}`;
     const cached = getCachedAdminData<{
       stats: typeof stats;
       unpaidTenants: typeof unpaidTenants;
@@ -150,27 +157,33 @@ export const Dashboard = () => {
     setFetchError('');
 
     try {
-      const currentMonthStart = startOfMonth(new Date());
-      const currentMonthEnd = lastDayOfMonth(currentMonthStart);
-      const billingMonth = format(currentMonthStart, 'yyyy-MM-dd');
-      const todayKey = format(new Date(), 'yyyy-MM-dd');
+      const currentMonthStart = selectedMonthStart;
+      const currentMonthEnd = selectedMonthEnd;
+      const billingMonth = selectedBillingMonth;
+      const occupancyReferenceDate = format(currentMonthEnd, 'yyyy-MM-dd');
 
       const [
         { count: roomsCount, error: roomsCountError },
         { data: beds, error: bedsError },
         { data: expenses, error: expensesError },
         { data: roomRows, error: roomRowsError },
-      ] = await Promise.all([
-        supabase.from('rooms').select('*', { count: 'exact', head: true }).eq('property_id', selectedPropertyId),
-        supabase.from('beds').select('id, status, bed_number, room_id, property_id').eq('property_id', selectedPropertyId),
-        supabase.from('expenses').select('amount, expense_date'),
-        supabase.from('rooms').select('id, name').eq('property_id', selectedPropertyId),
-      ]);
+      ] = await withSupabaseTimeout(
+        Promise.all([
+          supabase.from('rooms').select('*', { count: 'exact', head: true }).eq('property_id', selectedPropertyId),
+          supabase.from('beds').select('id, status, bed_number, room_id, property_id').eq('property_id', selectedPropertyId),
+          supabase.from('expenses').select('amount, expense_date'),
+          supabase.from('rooms').select('id, name').eq('property_id', selectedPropertyId),
+        ]),
+        'Dashboard data took too long to load. Please try again.',
+      );
 
-      const enhancedTenantsResult = await supabase
-        .from('tenants')
-        .select('id, name, email, photo_url, bed_id, rent_amount, prorated_rent, start_date, end_date, property_id')
-        .eq('property_id', selectedPropertyId);
+      const enhancedTenantsResult = await withSupabaseTimeout(
+        supabase
+          .from('tenants')
+          .select('id, name, email, photo_url, bed_id, rent_amount, prorated_rent, start_date, end_date, property_id')
+          .eq('property_id', selectedPropertyId),
+        'Tenant bookings took too long to load. Please try again.',
+      );
 
       if (roomsCountError) throw roomsCountError;
       if (bedsError) throw bedsError;
@@ -180,10 +193,13 @@ export const Dashboard = () => {
       let tenants: TenantSummary[] | null = null;
       if (enhancedTenantsResult.error) {
         if (isMissingColumnError(enhancedTenantsResult.error)) {
-          const fallbackTenantsResult = await supabase
-            .from('tenants')
-            .select('id, name, email, photo_url, bed_id, rent_amount, start_date, end_date, property_id')
-            .eq('property_id', selectedPropertyId);
+          const fallbackTenantsResult = await withSupabaseTimeout(
+            supabase
+              .from('tenants')
+              .select('id, name, email, photo_url, bed_id, rent_amount, start_date, end_date, property_id')
+              .eq('property_id', selectedPropertyId),
+            'Tenant bookings took too long to load. Please try again.',
+          );
 
           if (fallbackTenantsResult.error) throw fallbackTenantsResult.error;
           tenants = (fallbackTenantsResult.data ?? []) as TenantSummary[];
@@ -203,11 +219,18 @@ export const Dashboard = () => {
         return { ...tenant, bed, room };
       });
 
-      const occupied = safeBeds.filter((bed) => bed.status === 'occupied').length;
+      const occupied = safeBeds.filter((bed) => safeTenants.some((tenant) => (
+        tenant.bed_id === bed.id &&
+        tenant.start_date <= occupancyReferenceDate &&
+        (!tenant.end_date || tenant.end_date >= occupancyReferenceDate)
+      ))).length;
       const totalBeds = safeBeds.length;
       const tenantIds = safeTenants.map((tenant) => tenant.id);
       const paymentsResult = tenantIds.length > 0
-        ? await supabase.from('payments').select('tenant_id, amount, status, billing_month, is_balance_waived').in('tenant_id', tenantIds)
+        ? await withSupabaseTimeout(
+          supabase.from('payments').select('tenant_id, amount, status, billing_month, is_balance_waived').in('tenant_id', tenantIds),
+          'Payments took too long to load. Please try again.',
+        )
         : { data: [] as PaymentRecord[], error: null };
 
       if (paymentsResult.error) throw paymentsResult.error;
@@ -227,7 +250,10 @@ export const Dashboard = () => {
       });
 
       const chargesResult = tenantIds.length > 0
-        ? await supabase.from('tenant_charges').select('tenant_id, amount, billing_month').in('tenant_id', tenantIds)
+        ? await withSupabaseTimeout(
+          supabase.from('tenant_charges').select('tenant_id, amount, billing_month').in('tenant_id', tenantIds),
+          'Extra charges took too long to load. Please try again.',
+        )
         : { data: [] as ChargeRecord[], error: null };
       const chargeTotals = new Map<string, number>();
       (chargesResult.data ?? [])
@@ -269,17 +295,17 @@ export const Dashboard = () => {
         const room = safeRooms.find((item) => item.id === bed.room_id);
         const currentTenant = safeTenants.find((tenant) => (
           tenant.bed_id === bed.id &&
-          tenant.start_date <= todayKey &&
-          (!tenant.end_date || tenant.end_date >= todayKey)
+          tenant.start_date <= occupancyReferenceDate &&
+          (!tenant.end_date || tenant.end_date >= occupancyReferenceDate)
         ));
         const advanceBooking = safeTenants
-          .filter((tenant) => tenant.bed_id === bed.id && tenant.start_date > todayKey)
+          .filter((tenant) => tenant.bed_id === bed.id && tenant.start_date > occupancyReferenceDate)
           .sort((left, right) => left.start_date.localeCompare(right.start_date))[0];
 
         return {
           roomName: room?.name ?? 'Unknown room',
           bedNumber: bed.bed_number,
-          bedStatus: bed.status,
+          bedStatus: currentTenant ? 'occupied' : 'vacant',
           currentTenant: currentTenant?.name ?? 'Vacant',
           advanceBooking: advanceBooking ? `${advanceBooking.name} (${format(new Date(advanceBooking.start_date), 'MMM dd, yyyy')})` : 'None',
         };
@@ -289,15 +315,15 @@ export const Dashboard = () => {
       const expiring = safeTenants
         .filter((tenant) => (
           tenant.end_date &&
-          tenant.end_date >= todayKey &&
-          tenant.end_date <= format(addDays(new Date(), 7), 'yyyy-MM-dd')
+          tenant.end_date >= billingMonth &&
+          tenant.end_date <= format(addDays(currentMonthEnd, 7), 'yyyy-MM-dd')
         ))
         .map((tenant) => ({
           id: tenant.id,
           name: tenant.name,
           roomName: tenant.room?.name,
           bedNumber: tenant.bed?.bed_number,
-          daysToExpiry: Math.max(0, Math.ceil((new Date(tenant.end_date as string).getTime() - new Date(todayKey).getTime()) / (1000 * 60 * 60 * 24))),
+          daysToExpiry: Math.max(0, Math.ceil((new Date(tenant.end_date as string).getTime() - currentMonthEnd.getTime()) / (1000 * 60 * 60 * 24))),
         }));
       const monthlyExpenses = safeExpenses
         .filter((expense) => expense.expense_date >= billingMonth && expense.expense_date <= format(currentMonthEnd, 'yyyy-MM-dd'))
@@ -354,7 +380,7 @@ export const Dashboard = () => {
     } finally {
       setLoading(false);
     }
-  }, [selectedPropertyId]);
+  }, [selectedBillingMonth, selectedMonthEnd, selectedMonthStart, selectedPropertyId]);
 
   useEffect(() => {
     void fetchStats();
@@ -362,14 +388,14 @@ export const Dashboard = () => {
 
   const exportCollectionsCsv = () => {
     downloadCsv(
-      `collections-summary-${format(new Date(), 'yyyy-MM')}.csv`,
+      `collections-summary-${monthFilter}.csv`,
       ['Section', 'Label', 'Value'],
       [
-        ['Summary', 'Revenue This Month', stats.monthlyRevenue],
-        ['Summary', 'Expenses This Month', stats.monthlyExpenses],
-        ['Summary', 'Net Profit This Month', stats.monthlyNetProfit],
-        ['Summary', 'Expected This Month', stats.monthlyExpected],
-        ['Summary', 'Remaining This Month', stats.monthlyRemaining],
+        ['Summary', `Revenue For ${selectedMonthLabel}`, stats.monthlyRevenue],
+        ['Summary', `Expenses For ${selectedMonthLabel}`, stats.monthlyExpenses],
+        ['Summary', `Net Profit For ${selectedMonthLabel}`, stats.monthlyNetProfit],
+        ['Summary', `Expected For ${selectedMonthLabel}`, stats.monthlyExpected],
+        ['Summary', `Remaining For ${selectedMonthLabel}`, stats.monthlyRemaining],
         ['Summary', 'Unpaid Tenants', stats.unpaidCount],
         ['Summary', 'Partial Tenants', stats.partialCount],
       ],
@@ -378,13 +404,14 @@ export const Dashboard = () => {
 
   const exportUnpaidCsv = () => {
     downloadCsv(
-      `unpaid-tenants-${format(new Date(), 'yyyy-MM')}.csv`,
-      ['Tenant', 'Email', 'Room', 'Bed', 'Due', 'Paid', 'Remaining', 'Status'],
+      `unpaid-tenants-${monthFilter}.csv`,
+      ['Tenant', 'Email', 'Room', 'Bed', 'Billing Month', 'Due', 'Paid', 'Remaining', 'Status'],
       unpaidTenants.map((tenant) => [
         tenant.name,
         tenant.email ?? '',
         tenant.roomName ?? 'Unknown room',
         tenant.bedNumber ?? 'Unknown bed',
+        selectedMonthLabel,
         tenant.due,
         tenant.paid,
         tenant.remaining,
@@ -395,7 +422,7 @@ export const Dashboard = () => {
 
   const exportOccupancyCsv = () => {
     downloadCsv(
-      `occupancy-${format(new Date(), 'yyyy-MM-dd')}.csv`,
+      `occupancy-${monthFilter}.csv`,
       ['Room', 'Bed', 'Bed Status', 'Current Tenant', 'Advance Booking'],
       occupancyRows.map((row) => [
         row.roomName,
@@ -463,10 +490,19 @@ export const Dashboard = () => {
         <div>
           <h1 className="page-title">Overview</h1>
           <p style={{ color: 'var(--text-secondary)' }}>
-            Monthly occupancy, collections, and follow-up items for {selectedProperty?.name ?? 'the selected property'}.
+            Monthly occupancy, collections, and follow-up items for {selectedProperty?.name ?? 'the selected property'} in {selectedMonthLabel}.
           </p>
         </div>
         <div className="admin-toolbar">
+          <div className="toolbar-month-field">
+            <Input
+              type="month"
+              value={monthFilter}
+              aria-label="Dashboard month"
+              title="Dashboard month"
+              onChange={(e) => setMonthFilter(e.target.value)}
+            />
+          </div>
           <Button className="desktop-only" variant="secondary" onClick={exportCollectionsCsv}>
             <Download size={16} /> Collections CSV
           </Button>
@@ -538,25 +574,25 @@ export const Dashboard = () => {
         <Card style={{ borderLeft: '4px solid #8b5cf6', gridColumn: '1 / -1' }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem', alignItems: 'center' }}>
             <div>
-              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Revenue This Month</p>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Revenue</p>
               <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: '#8b5cf6' }}>{formatCurrency(stats.monthlyRevenue)}</h2>
             </div>
             <div>
-              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Expected This Month</p>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Expected</p>
               <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem' }}>{formatCurrency(stats.monthlyExpected)}</h2>
             </div>
             <div>
-              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Expenses This Month</p>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Expenses</p>
               <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: 'var(--danger)' }}>{formatCurrency(stats.monthlyExpenses)}</h2>
             </div>
             <div>
-              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Net Profit This Month</p>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Net Profit</p>
               <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: stats.monthlyNetProfit >= 0 ? 'var(--success)' : 'var(--danger)' }}>
                 {formatCurrency(stats.monthlyNetProfit)}
               </h2>
             </div>
             <div>
-              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Remaining This Month</p>
+              <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>Remaining</p>
               <h2 style={{ fontSize: '2.25rem', marginTop: '0.5rem', color: 'var(--warning)' }}>{formatCurrency(stats.monthlyRemaining)}</h2>
             </div>
             <div>
@@ -571,8 +607,8 @@ export const Dashboard = () => {
         <Card style={{ marginBottom: '1rem', borderColor: 'rgba(245, 158, 11, 0.35)', padding: '0.9rem 1rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
             <div style={{ color: 'var(--text-secondary)' }}>
-              {unpaidTenants.length > 0 ? `${unpaidTenants.length} unpaid or partial this month. ` : ''}
-              {expiringTenants.length > 0 ? `${expiringTenants.length} expiring within 7 days.` : ''}
+              {unpaidTenants.length > 0 ? `${unpaidTenants.length} unpaid or partial in ${selectedMonthLabel}. ` : ''}
+              {expiringTenants.length > 0 ? `${expiringTenants.length} ending by ${format(addDays(selectedMonthEnd, 7), 'MMM dd, yyyy')}.` : ''}
             </div>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               {unpaidTenants.length > 0 ? <span className="badge badge-danger">{unpaidTenants.length} Unpaid</span> : null}
@@ -583,10 +619,10 @@ export const Dashboard = () => {
       )}
 
       <Card>
-        <h2 style={{ marginBottom: '1rem' }}>Unpaid This Month</h2>
+        <h2 style={{ marginBottom: '1rem' }}>Unpaid For {selectedMonthLabel}</h2>
         {unpaidTenants.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '1rem 0', color: 'var(--text-secondary)' }}>
-            Everyone active this month is fully paid.
+            Everyone active in {selectedMonthLabel} is fully paid.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>

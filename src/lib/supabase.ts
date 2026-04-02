@@ -12,3 +12,26 @@ export const createTransientSupabaseClient = () => createClient(supabaseUrl, sup
     detectSessionInUrl: false,
   },
 });
+
+export const withSupabaseTimeout = async <T>(
+  promise: PromiseLike<T>,
+  message = 'The request took too long. Please try again.',
+  timeoutMs = 15000,
+) => {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(message));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+};
