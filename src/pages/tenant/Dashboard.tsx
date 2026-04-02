@@ -543,61 +543,13 @@ export const TenantDashboard = () => {
       <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>Here is your rental overview.</p>
       <Card style={{ marginBottom: '1.5rem' }}>
         <h2 style={{ marginBottom: '0.8rem' }}>Profile</h2>
-        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '1rem' }}>
-          {bookings[0].photo_url ? (
-            <img src={bookings[0].photo_url} alt={bookings[0].name} style={{ width: '70px', height: '70px', borderRadius: '999px', objectFit: 'cover' }} />
-          ) : (
-            <div style={{ width: '70px', height: '70px', borderRadius: '999px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-glow)', fontWeight: 700 }}>
-              {bookings[0].name.slice(0, 2).toUpperCase()}
-            </div>
-          )}
-          <div style={{ display: 'grid', gap: '0.75rem', minWidth: '280px' }}>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Upload / Change Photo</label>
-              <input className="form-input" type="file" accept="image/*" onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleProfileFileUpload(file, 'photo');
-              }} disabled={profileSaving} />
-            </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Upload / Change Document</label>
-              <input className="form-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleProfileFileUpload(file, 'document');
-              }} disabled={profileSaving} />
-            </div>
-            {bookings[0].document_url ? (
-              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                <a href={bookings[0].document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.9rem' }}>
-                  View uploaded document
-                </a>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setProfileSaving(true);
-                    setProfileMessage('');
-                    try {
-                      await supabase.from('tenants').update({ document_url: null }).eq('id', bookings[0].id);
-                      setBookings((current) => current.map((booking) => (
-                        booking.id === bookings[0].id ? { ...booking, document_url: null } : booking
-                      )));
-                      setProfileMessage('Document removed.');
-                    } catch (error) {
-                      setProfileMessage(error instanceof Error ? error.message : 'Unable to remove document.');
-                    } finally {
-                      setProfileSaving(false);
-                    }
-                  }}
-                  style={{ fontSize: '0.85rem', color: 'var(--danger)' }}
-                >
-                  Remove document
-                </button>
-              </div>
-            ) : null}
-            {profileMessage ? <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{profileMessage}</div> : null}
-          </div>
+        <div style={{ marginBottom: '1rem' }}>
+          <h3 style={{ marginBottom: '0.35rem', fontSize: '1rem' }}>Personal Information</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+            You can update your own personal details here. Contract information like rent and dates remains managed by admin.
+          </p>
         </div>
-        <form onSubmit={handleProfileSave} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+        <form onSubmit={handleProfileSave} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
           <Input
             label="Full Name"
             value={profileForm.name}
@@ -655,10 +607,70 @@ export const TenantDashboard = () => {
               className="btn btn-primary"
               disabled={profileSaving}
             >
-              {profileSaving ? 'Saving...' : 'Update Profile'}
+              {profileSaving ? 'Saving...' : 'Update Personal Info'}
             </button>
           </div>
         </form>
+        <div style={{ marginBottom: '1rem' }}>
+          <h3 style={{ marginBottom: '0.35rem', fontSize: '1rem' }}>Photo And Documents</h3>
+          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+            Manage your profile photo and supporting document here.
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '0.25rem' }}>
+          {bookings[0].photo_url ? (
+            <img src={bookings[0].photo_url} alt={bookings[0].name} style={{ width: '70px', height: '70px', borderRadius: '999px', objectFit: 'cover' }} />
+          ) : (
+            <div style={{ width: '70px', height: '70px', borderRadius: '999px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-glow)', fontWeight: 700 }}>
+              {bookings[0].name.slice(0, 2).toUpperCase()}
+            </div>
+          )}
+          <div style={{ display: 'grid', gap: '0.75rem', minWidth: '280px' }}>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Upload / Change Photo</label>
+              <input className="form-input" type="file" accept="image/*" onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleProfileFileUpload(file, 'photo');
+              }} disabled={profileSaving} />
+            </div>
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Upload / Change Document</label>
+              <input className="form-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp" onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleProfileFileUpload(file, 'document');
+              }} disabled={profileSaving} />
+            </div>
+            {bookings[0].document_url ? (
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                <a href={bookings[0].document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.9rem' }}>
+                  View uploaded document
+                </a>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setProfileSaving(true);
+                    setProfileMessage('');
+                    try {
+                      await supabase.from('tenants').update({ document_url: null }).eq('id', bookings[0].id);
+                      setBookings((current) => current.map((booking) => (
+                        booking.id === bookings[0].id ? { ...booking, document_url: null } : booking
+                      )));
+                      setProfileMessage('Document removed.');
+                    } catch (error) {
+                      setProfileMessage(error instanceof Error ? error.message : 'Unable to remove document.');
+                    } finally {
+                      setProfileSaving(false);
+                    }
+                  }}
+                  style={{ fontSize: '0.85rem', color: 'var(--danger)' }}
+                >
+                  Remove document
+                </button>
+              </div>
+            ) : null}
+            {profileMessage ? <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{profileMessage}</div> : null}
+          </div>
+        </div>
       </Card>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
