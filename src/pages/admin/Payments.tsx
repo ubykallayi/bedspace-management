@@ -909,6 +909,30 @@ export const Payments = () => {
   const sortedTenants = useMemo(() => (
     [...tenants].sort((left, right) => left.name.localeCompare(right.name))
   ), [tenants]);
+  const payableTenants = useMemo(() => {
+    const formMonthStart = startOfMonth(new Date(formData.billing_month));
+    const formMonthEnd = lastDayOfMonth(formMonthStart);
+    const formMonthStartKey = format(formMonthStart, 'yyyy-MM-dd');
+    const formMonthEndKey = format(formMonthEnd, 'yyyy-MM-dd');
+
+    return tenants
+      .filter((tenant) => (
+        tenant.is_active !== false &&
+        tenant.start_date <= formMonthEndKey &&
+        (!tenant.end_date || tenant.end_date >= formMonthStartKey)
+      ))
+      .map((tenant) => {
+        const cycleSummary = calculateTenantBalanceForMonth(tenant, formData.billing_month, payments, allCharges);
+        return {
+          tenant,
+          cycleSummary,
+        };
+      })
+      .filter(({ tenant, cycleSummary }) => (
+        tenant.id === formData.tenant_id || cycleSummary.remainingAmount > 0 || cycleSummary.status === 'partial' || cycleSummary.status === 'unpaid'
+      ))
+      .sort((left, right) => left.tenant.name.localeCompare(right.tenant.name));
+  }, [allCharges, formData.billing_month, formData.tenant_id, payments, tenants]);
   const filteredManualCharges = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
 
@@ -1124,8 +1148,16 @@ export const Payments = () => {
             <PlusCircle size={16} /> Manual Charge
           </Button>
           <Button onClick={() => {
-            setShowForm((value) => !value);
             setShowChargeForm(false);
+            setShowForm((value) => {
+              const nextValue = !value;
+              if (nextValue) {
+                window.requestAnimationFrame(() => {
+                  formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                });
+              }
+              return nextValue;
+            });
           }}>
             {showForm ? 'Cancel' : 'Record Payment'}
           </Button>
@@ -1246,10 +1278,10 @@ export const Payments = () => {
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label">Tenant</label>
               <select className="form-select" required value={formData.tenant_id} onChange={(e) => handleTenantSelect(e.target.value)}>
-                <option value="">Select Tenant</option>
-                {sortedTenants.map((tenant) => (
+                <option value="">{payableTenants.length > 0 ? 'Select Tenant' : 'No unpaid or partial tenants'}</option>
+                {payableTenants.map(({ tenant, cycleSummary }) => (
                   <option key={tenant.id} value={tenant.id}>
-                    {tenant.name} | {tenant.room?.name} | Bed {tenant.bed?.bed_number} | Rent {formatCurrency(Number(tenant.rent_amount))}
+                    {tenant.name} | {tenant.room?.name} | Bed {tenant.bed?.bed_number} | Balance {formatCurrency(cycleSummary.remainingAmount)}
                   </option>
                 ))}
               </select>
@@ -1427,7 +1459,7 @@ export const Payments = () => {
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-            <div style={{
+            <div className="desktop-stack" style={{
               display: 'grid',
               gridTemplateColumns: 'minmax(220px, 1.4fr) minmax(180px, 1.1fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(130px, 0.9fr) minmax(130px, 0.9fr)',
               gap: '1rem',
@@ -1447,20 +1479,56 @@ export const Payments = () => {
               <div>Status</div>
             </div>
             {filteredMonthlyTenantStatuses.filter((tenant) => tenant.remaining > 0).map((tenant) => (
-              <div key={tenant.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1.4fr) minmax(180px, 1.1fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(130px, 0.9fr) minmax(130px, 0.9fr)', gap: '1rem', padding: '0.9rem 0', borderBottom: '1px solid rgba(255,255,255,0.06)', alignItems: 'center' }}>
-                <div>
-                  <div style={{ fontWeight: 600 }}>{tenant.name}</div>
-                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>{tenant.room?.name} | Bed {tenant.bed?.bed_number}</div>
+              <div key={tenant.id}>
+                <div className="desktop-stack" style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1.4fr) minmax(180px, 1.1fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(110px, 0.8fr) minmax(130px, 0.9fr) minmax(130px, 0.9fr)', gap: '1rem', padding: '0.9rem 0', borderBottom: '1px solid rgba(255,255,255,0.06)', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{tenant.name}</div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>{tenant.room?.name} | Bed {tenant.bed?.bed_number}</div>
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)' }}>{tenant.email ?? 'No email saved'}</div>
+                  <div>{formatCurrency(tenant.rentDue ?? 0)}</div>
+                  <div>{formatCurrency(tenant.otherCharges ?? 0)}</div>
+                  <div>{formatCurrency(tenant.paid)}</div>
+                  <div style={{ color: 'var(--warning)', fontWeight: 600 }}>{formatCurrency(tenant.remaining)}</div>
+                  <div style={{ justifySelf: 'end' }}>
+                    <span className={`badge ${getPaymentStatusBadgeClass(tenant.cycleStatus)}`}>
+                      {getPaymentStatusLabel(tenant.cycleStatus)}
+                    </span>
+                  </div>
                 </div>
-                <div style={{ color: 'var(--text-secondary)' }}>{tenant.email ?? 'No email saved'}</div>
-                <div>{formatCurrency(tenant.rentDue ?? 0)}</div>
-                <div>{formatCurrency(tenant.otherCharges ?? 0)}</div>
-                <div>{formatCurrency(tenant.paid)}</div>
-                <div style={{ color: 'var(--warning)', fontWeight: 600 }}>{formatCurrency(tenant.remaining)}</div>
-                <div style={{ justifySelf: 'end' }}>
-                  <span className={`badge ${getPaymentStatusBadgeClass(tenant.cycleStatus)}`}>
-                    {getPaymentStatusLabel(tenant.cycleStatus)}
-                  </span>
+                <div className="mobile-stack" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)', padding: '0.95rem 0' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem', marginBottom: '0.6rem' }}>
+                    <div>
+                      <div style={{ fontWeight: 600 }}>{tenant.name}</div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+                        {tenant.room?.name} | Bed {tenant.bed?.bed_number}
+                      </div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem', marginTop: '0.2rem' }}>
+                        {tenant.email ?? 'No email saved'}
+                      </div>
+                    </div>
+                    <span className={`badge ${getPaymentStatusBadgeClass(tenant.cycleStatus)}`}>
+                      {getPaymentStatusLabel(tenant.cycleStatus)}
+                    </span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.6rem' }}>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>Rent</div>
+                      <div style={{ fontWeight: 600 }}>{formatCurrency(tenant.rentDue ?? 0)}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>Other</div>
+                      <div style={{ fontWeight: 600 }}>{formatCurrency(tenant.otherCharges ?? 0)}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>Paid</div>
+                      <div style={{ fontWeight: 600 }}>{formatCurrency(tenant.paid)}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>Balance</div>
+                      <div style={{ fontWeight: 700, color: 'var(--warning)' }}>{formatCurrency(tenant.remaining)}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}

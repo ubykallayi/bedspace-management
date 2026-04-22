@@ -308,6 +308,14 @@ option {
   display: none;
 }
 
+.desktop-stack {
+  display: block;
+}
+
+.mobile-stack {
+  display: none;
+}
+
 .toolbar-month-field {
   min-width: 150px;
   max-width: 170px;
@@ -532,6 +540,14 @@ option {
 
   .mobile-only {
     display: inline-flex;
+  }
+
+  .desktop-stack {
+    display: none !important;
+  }
+
+  .mobile-stack {
+    display: block;
   }
 
   .topbar-shell {
