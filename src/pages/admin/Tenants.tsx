@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { differenceInDays, format, subDays } from 'date-fns';
-import { AlertCircle, Download, Pencil, Plus, Power, Search, Trash2 } from 'lucide-react';
+import { AlertCircle, Download, Eye, Pencil, Plus, Power, Search, Trash2 } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
@@ -17,8 +17,11 @@ import {
   getBookingStatusLabel,
   getMonthInputValue,
   getMonthStartKey,
+  getPaymentStatusBadgeClass,
+  getPaymentStatusLabel,
   isMissingColumnError,
   writeActivityLog,
+  calculateTenantBalanceForMonth,
 } from '../../lib/admin';
 import { getCachedAdminData, invalidateAdminDataCache, setCachedAdminData } from '../../lib/adminDataCache';
 import { AdminAlertsData, fetchAdminAlerts, getCachedAdminAlerts } from '../../lib/adminAlerts';
@@ -90,6 +93,33 @@ type TenantFormState = {
 
 type RawTenantRecord = Omit<TenantRecord, 'bed' | 'room'>;
 
+type TenantPaymentRecord = {
+  id: string;
+  tenant_id: string;
+  amount: number | string;
+  payment_date: string;
+  billing_month: string;
+  status: 'paid' | 'pending';
+  is_balance_waived?: boolean;
+};
+
+type TenantChargeRecord = {
+  id?: string;
+  tenant_id: string;
+  billing_month: string;
+  amount: number | string;
+  expense_id?: string | null;
+  expenses?: {
+    description?: string | null;
+    category?: string | null;
+    expense_date?: string | null;
+  } | Array<{
+    description?: string | null;
+    category?: string | null;
+    expense_date?: string | null;
+  }> | null;
+};
+
 const INITIAL_FORM_STATE: TenantFormState = {
   name: '',
   phone: '',
@@ -134,6 +164,9 @@ export const Tenants = () => {
   const [editingTenantId, setEditingTenantId] = useState<string | null>(null);
   const [tenantSchemaSupportsAdminStatus, setTenantSchemaSupportsAdminStatus] = useState(false);
   const [tenantSchemaSupportsProratedRent, setTenantSchemaSupportsProratedRent] = useState(true);
+  const [tenantPayments, setTenantPayments] = useState<TenantPaymentRecord[]>([]);
+  const [tenantCharges, setTenantCharges] = useState<TenantChargeRecord[]>([]);
+  const [viewingTenantId, setViewingTenantId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [bookingStatusFilter, setBookingStatusFilter] = useState('all');
   const [activationFilter, setActivationFilter] = useState('all');
@@ -172,6 +205,8 @@ export const Tenants = () => {
       setBeds([]);
       setRooms([]);
       setTenants([]);
+      setTenantPayments([]);
+      setTenantCharges([]);
       setFetchError('');
       setLoading(false);
       return;
@@ -184,6 +219,8 @@ export const Tenants = () => {
       rooms: RoomRecord[];
       tenantSchemaSupportsAdminStatus: boolean;
       tenantSchemaSupportsProratedRent: boolean;
+      tenantPayments: TenantPaymentRecord[];
+      tenantCharges: TenantChargeRecord[];
     }>(cacheKey);
 
     if (cached) {
@@ -192,6 +229,8 @@ export const Tenants = () => {
       setBeds(cached.beds);
       setRooms(cached.rooms);
       setTenants(cached.tenants);
+      setTenantPayments(cached.tenantPayments);
+      setTenantCharges(cached.tenantCharges);
       setLoading(false);
     } else {
       setLoading(true);
@@ -286,19 +325,61 @@ export const Tenants = () => {
 
       const safeBeds = (bedsData ?? []) as BedOption[];
       const safeRooms = (roomsData ?? []) as RoomRecord[];
+      const enrichedTenants = attachRoomAndBed(tenantRows, safeBeds, safeRooms);
+      const tenantIds = enrichedTenants.map((tenant) => tenant.id);
+
+      let paymentRows: TenantPaymentRecord[] = [];
+      let chargeRows: TenantChargeRecord[] = [];
+
+      if (tenantIds.length > 0) {
+        const [
+          { data: paymentsData, error: paymentsError },
+          { data: chargesData, error: chargesError },
+        ] = await withSupabaseTimeout(
+          Promise.all([
+            supabase
+              .from('payments')
+              .select('id, tenant_id, amount, payment_date, billing_month, status, is_balance_waived')
+              .in('tenant_id', tenantIds)
+              .order('payment_date', { ascending: false }),
+            supabase
+              .from('tenant_charges')
+              .select('id, tenant_id, billing_month, amount, expense_id, expenses ( description, category, expense_date )')
+              .in('tenant_id', tenantIds),
+          ]),
+          'Tenant payment history took too long to load. Please try again.',
+        );
+
+        if (paymentsError) {
+          console.error('Tenant payment history fetch error:', paymentsError);
+          setFetchError((current) => current || paymentsError.message || 'Unable to load tenant payment history.');
+        } else {
+          paymentRows = (paymentsData ?? []) as TenantPaymentRecord[];
+        }
+
+        if (chargesError) {
+          console.error('Tenant charge history fetch error:', chargesError);
+          setFetchError((current) => current || chargesError.message || 'Unable to load tenant charge history.');
+        } else {
+          chargeRows = (chargesData ?? []) as TenantChargeRecord[];
+        }
+      }
 
       setTenantSchemaSupportsAdminStatus(schemaSupportsAdminStatus);
       setTenantSchemaSupportsProratedRent(schemaSupportsProratedRent);
       setBeds(safeBeds);
       setRooms(safeRooms);
-      const enrichedTenants = attachRoomAndBed(tenantRows, safeBeds, safeRooms);
       setTenants(enrichedTenants);
+      setTenantPayments(paymentRows);
+      setTenantCharges(chargeRows);
       setCachedAdminData(cacheKey, {
         tenants: enrichedTenants,
         beds: safeBeds,
         rooms: safeRooms,
         tenantSchemaSupportsAdminStatus: schemaSupportsAdminStatus,
         tenantSchemaSupportsProratedRent: schemaSupportsProratedRent,
+        tenantPayments: paymentRows,
+        tenantCharges: chargeRows,
       });
     } catch (nextError) {
       console.error('Tenants fetch crash:', nextError);
@@ -714,19 +795,34 @@ export const Tenants = () => {
   };
 
   const tenantsWithStatus = useMemo(() => {
+    const currentBillingMonth = getMonthStartKey(new Date());
+
     return tenants.map((tenant) => {
       const bookingStatus = getBookingLifecycleStatus(
         tenant.start_date,
         tenant.end_date,
         tenant.is_active !== false,
       );
+      const tenantPaymentHistory = tenantPayments
+        .filter((payment) => payment.tenant_id === tenant.id)
+        .sort((left, right) => right.payment_date.localeCompare(left.payment_date));
+      const lastPaidPayment = tenantPaymentHistory.find((payment) => payment.status === 'paid') ?? null;
+      const currentBalance = calculateTenantBalanceForMonth(
+        tenant,
+        currentBillingMonth,
+        tenantPayments,
+        tenantCharges,
+      ).remainingAmount;
 
       return {
         ...tenant,
         bookingStatus,
+        lastPaymentDate: lastPaidPayment?.payment_date ?? null,
+        currentBalance,
+        paymentHistoryCount: tenantPaymentHistory.length,
       };
     });
-  }, [tenants]);
+  }, [tenantCharges, tenantPayments, tenants]);
 
   const filteredTenants = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
@@ -752,7 +848,7 @@ export const Tenants = () => {
   const exportTenantsCsv = () => {
     downloadCsv(
       `tenants-${format(new Date(), 'yyyy-MM-dd')}.csv`,
-      ['Tenant', 'Email', 'Phone', 'Room', 'Bed', 'Booking Status', 'Manual Status', 'Rent', 'Start Date', 'End Date', 'Updated At'],
+      ['Tenant', 'Email', 'Phone', 'Room', 'Bed', 'Booking Status', 'Manual Status', 'Rent', 'Start Date', 'End Date', 'Last Payment Date', 'Current Balance', 'Updated At'],
       filteredTenants.map((tenant) => [
         tenant.name,
         tenant.email,
@@ -764,10 +860,55 @@ export const Tenants = () => {
         Number(tenant.rent_amount),
         tenant.start_date,
         tenant.end_date ?? 'Ongoing',
+        tenant.lastPaymentDate ?? '',
+        tenant.currentBalance ?? 0,
         tenant.updated_at ?? '',
       ]),
     );
   };
+
+  const selectedHistoryTenant = useMemo(
+    () => tenantsWithStatus.find((tenant) => tenant.id === viewingTenantId) ?? null,
+    [tenantsWithStatus, viewingTenantId],
+  );
+
+  const selectedHistoryPayments = useMemo(() => {
+    if (!selectedHistoryTenant) return [];
+
+    return tenantPayments
+      .filter((payment) => payment.tenant_id === selectedHistoryTenant.id)
+      .sort((left, right) => {
+        const dateCompare = right.payment_date.localeCompare(left.payment_date);
+        if (dateCompare !== 0) return dateCompare;
+        return right.billing_month.localeCompare(left.billing_month);
+      });
+  }, [selectedHistoryTenant, tenantPayments]);
+
+  const selectedHistoryCharges = useMemo(() => {
+    if (!selectedHistoryTenant) return [];
+
+    const getChargeExpenseDate = (charge: TenantChargeRecord) => (
+      Array.isArray(charge.expenses) ? charge.expenses[0]?.expense_date : charge.expenses?.expense_date
+    );
+
+    const getChargeDescription = (charge: TenantChargeRecord) => (
+      Array.isArray(charge.expenses) ? charge.expenses[0]?.description : charge.expenses?.description
+    );
+
+    const getChargeCategory = (charge: TenantChargeRecord) => (
+      Array.isArray(charge.expenses) ? charge.expenses[0]?.category : charge.expenses?.category
+    );
+
+    return tenantCharges
+      .filter((charge) => charge.tenant_id === selectedHistoryTenant.id)
+      .map((charge) => ({
+        ...charge,
+        chargeDate: getChargeExpenseDate(charge) ?? charge.billing_month,
+        description: getChargeDescription(charge) ?? 'Extra Charge',
+        category: getChargeCategory(charge) ?? 'Charge',
+      }))
+      .sort((left, right) => right.chargeDate.localeCompare(left.chargeDate));
+  }, [selectedHistoryTenant, tenantCharges]);
 
   if (loading) {
     return (
@@ -1234,73 +1375,85 @@ export const Tenants = () => {
             : `${format(new Date(tenant.start_date), 'MMM dd')} - Ongoing`;
 
           return (
-            <Card key={tenant.id} style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '1.25rem',
-              gap: '1rem',
-              flexWrap: 'wrap',
-              borderColor: editingTenantId === tenant.id
-                ? 'var(--primary)'
-                : isUnpaid
-                  ? 'rgba(239, 68, 68, 0.4)'
+            <div key={tenant.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              <Card style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '1.25rem',
+                gap: '1rem',
+                flexWrap: 'wrap',
+                borderColor: editingTenantId === tenant.id
+                  ? 'var(--primary)'
+                  : isUnpaid
+                    ? 'rgba(239, 68, 68, 0.4)'
+                    : isExpiringSoon
+                      ? 'rgba(245, 158, 11, 0.45)'
+                      : undefined,
+                background: isUnpaid
+                  ? 'rgba(127, 29, 29, 0.12)'
                   : isExpiringSoon
-                    ? 'rgba(245, 158, 11, 0.45)'
+                    ? 'rgba(120, 53, 15, 0.12)'
                     : undefined,
-              background: isUnpaid
-                ? 'rgba(127, 29, 29, 0.12)'
-                : isExpiringSoon
-                  ? 'rgba(120, 53, 15, 0.12)'
-                  : undefined,
-            }}>
-              <div>
-              <h3 style={{ fontSize: '1.1rem', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
-                {tenant.photo_url ? (
-                  <img src={tenant.photo_url} alt={tenant.name} style={{ width: '48px', height: '48px', borderRadius: '999px', objectFit: 'cover', border: '1px solid var(--border-light)' }} />
-                ) : (
-                  <span style={{ width: '48px', height: '48px', borderRadius: '999px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-glow)', fontSize: '0.85rem', fontWeight: 600 }}>
-                    {tenant.name.slice(0, 2).toUpperCase()}
-                  </span>
-                )}
-                  <span>{tenant.name}</span>
-                  <span className={`badge ${getBookingStatusBadgeClass(bookingStatus)}`}>
-                    {getBookingStatusLabel(bookingStatus)}
-                  </span>
-                  {isUnpaid && <span className="badge badge-danger">Unpaid Rent</span>}
-                  {nearingExpiry && <AlertCircle size={16} color="var(--warning)" />}
-                </h3>
-                <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
-                  {tenant.room?.name ?? 'Room unavailable'} | Bed {tenant.bed?.bed_number ?? 'Unknown'} | {tenant.phone}
-                </p>
-                <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem' }}>{tenant.email}</p>
-                {tenant.document_url ? (
-                  <a href={tenant.document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.85rem' }}>
-                    View document
-                  </a>
-                ) : null}
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap', marginLeft: 'auto' }}>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Contract Period</div>
-                  <div style={{ fontSize: '0.875rem', fontWeight: 500 }}>
-                    {contractPeriodLabel}
-                  </div>
-                  {nearingExpiry && (
-                    <div style={{ color: 'var(--warning)', fontSize: '0.75rem', fontWeight: 600 }}>
-                      {daysLeft} days until expiry
+              }}>
+                <div style={{ flex: '1 1 320px', minWidth: 0 }}>
+                  <h3 style={{ fontSize: '1.1rem', marginBottom: '0.35rem', display: 'flex', alignItems: 'center', gap: '0.65rem', flexWrap: 'wrap' }}>
+                    {tenant.photo_url ? (
+                      <img src={tenant.photo_url} alt={tenant.name} style={{ width: '48px', height: '48px', borderRadius: '999px', objectFit: 'cover', border: '1px solid var(--border-light)' }} />
+                    ) : (
+                      <span style={{ width: '48px', height: '48px', borderRadius: '999px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-glow)', fontSize: '0.85rem', fontWeight: 600 }}>
+                        {tenant.name.slice(0, 2).toUpperCase()}
+                      </span>
+                    )}
+                    <span>{tenant.name}</span>
+                    <span className={`badge ${getBookingStatusBadgeClass(bookingStatus)}`}>
+                      {getBookingStatusLabel(bookingStatus)}
+                    </span>
+                    {isUnpaid && <span className="badge badge-danger">Unpaid Rent</span>}
+                    {nearingExpiry && <AlertCircle size={16} color="var(--warning)" />}
+                  </h3>
+                  <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', marginBottom: '0.25rem' }}>
+                    {tenant.room?.name ?? 'Room unavailable'} | Bed {tenant.bed?.bed_number ?? 'Unknown'} | {tenant.phone}
+                  </p>
+                  <p style={{ color: 'var(--text-tertiary)', fontSize: '0.875rem', marginBottom: '0.55rem' }}>{tenant.email}</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>Contract Period</div>
+                      <div style={{ fontSize: '0.875rem', fontWeight: 500 }}>{contractPeriodLabel}</div>
+                      {nearingExpiry ? (
+                        <div style={{ color: 'var(--warning)', fontSize: '0.75rem', fontWeight: 600 }}>
+                          {daysLeft} days until expiry
+                        </div>
+                      ) : null}
                     </div>
-                  )}
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>Rent</div>
+                      <div style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--primary)' }}>{formatCurrency(Number(tenant.rent_amount))}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>Last Payment</div>
+                      <div style={{ fontSize: '0.875rem', fontWeight: 500 }}>
+                        {tenant.lastPaymentDate ? format(new Date(tenant.lastPaymentDate), 'MMM dd, yyyy') : 'No payment yet'}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>Balance</div>
+                      <div style={{ fontSize: '1rem', fontWeight: 700, color: tenant.currentBalance > 0 ? 'var(--warning)' : 'var(--success)' }}>
+                        {formatCurrency(tenant.currentBalance ?? 0)}
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Rent</div>
-                  <div style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--primary)' }}>{formatCurrency(Number(tenant.rent_amount))}</div>
-                </div>
-
-                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                  <Button variant="secondary" onClick={() => handleEdit(tenant)}>
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end', marginLeft: 'auto' }}>
+                  <Button
+                    variant="secondary"
+                    onClick={() => setViewingTenantId((current) => current === tenant.id ? null : tenant.id)}
+                    title={viewingTenantId === tenant.id ? 'Hide history' : 'View tenant history'}
+                  >
+                    <Eye size={16} />
+                  </Button>
+                  <Button variant="secondary" onClick={() => handleEdit(tenant)} title="Edit tenant">
                     <Pencil size={16} />
                   </Button>
                   <Button
@@ -1330,12 +1483,117 @@ export const Tenants = () => {
                       await performDelete(tenant.id, tenant.bed_id, tenant.name);
                       setPendingAction(null);
                     },
-                  })}>
+                  })} title="Delete tenant">
                     <Trash2 size={16} color="var(--danger)" />
                   </Button>
                 </div>
-              </div>
-            </Card>
+              </Card>
+
+              {viewingTenantId === tenant.id && selectedHistoryTenant?.id === tenant.id ? (
+                <Card style={{ padding: '1rem 1.1rem', borderColor: 'rgba(123, 97, 255, 0.35)' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.9rem', marginBottom: '1rem' }}>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>Started Date</div>
+                      <div style={{ fontWeight: 600 }}>{format(new Date(selectedHistoryTenant.start_date), 'MMM dd, yyyy')}</div>
+                    </div>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>End Date</div>
+                      <div style={{ fontWeight: 600 }}>
+                        {selectedHistoryTenant.end_date ? format(new Date(selectedHistoryTenant.end_date), 'MMM dd, yyyy') : 'Ongoing'}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>Current Balance</div>
+                      <div style={{ fontWeight: 700, color: selectedHistoryTenant.currentBalance > 0 ? 'var(--warning)' : 'var(--success)' }}>
+                        {formatCurrency(selectedHistoryTenant.currentBalance ?? 0)}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>Payment Entries</div>
+                      <div style={{ fontWeight: 600 }}>{selectedHistoryPayments.length}</div>
+                    </div>
+                  </div>
+
+                  {selectedHistoryTenant.document_url ? (
+                    <div style={{ marginBottom: '1rem' }}>
+                      <a href={selectedHistoryTenant.document_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.9rem' }}>
+                        View tenant document
+                      </a>
+                    </div>
+                  ) : null}
+
+                  <div style={{ display: 'grid', gap: '1rem' }}>
+                    <div>
+                      <h4 style={{ marginBottom: '0.65rem' }}>Payment History</h4>
+                      {selectedHistoryPayments.length === 0 ? (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>No payment history recorded yet.</div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                          {selectedHistoryPayments.map((payment) => {
+                            const paymentStatus = payment.status === 'pending' ? 'unpaid' : (
+                              calculateTenantBalanceForMonth(selectedHistoryTenant, payment.billing_month, tenantPayments, tenantCharges).status
+                            );
+
+                            return (
+                              <div key={payment.id} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem', padding: '0.85rem 0.9rem', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 'var(--radius-sm)', background: 'rgba(255,255,255,0.02)' }}>
+                                <div>
+                                  <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Rent Month</div>
+                                  <div style={{ fontWeight: 600 }}>{format(new Date(payment.billing_month), 'MMM yyyy')}</div>
+                                </div>
+                                <div>
+                                  <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Payment Date</div>
+                                  <div style={{ fontWeight: 600 }}>{format(new Date(payment.payment_date), 'MMM dd, yyyy')}</div>
+                                </div>
+                                <div>
+                                  <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Amount</div>
+                                  <div style={{ fontWeight: 700 }}>{formatCurrency(Number(payment.amount))}</div>
+                                </div>
+                                <div>
+                                  <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Status</div>
+                                  <span className={`badge ${getPaymentStatusBadgeClass(paymentStatus)}`}>
+                                    {payment.status === 'pending' ? 'Pending' : getPaymentStatusLabel(paymentStatus)}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <h4 style={{ marginBottom: '0.65rem' }}>Other Charges</h4>
+                      {selectedHistoryCharges.length === 0 ? (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>No extra charges recorded for this tenant.</div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                          {selectedHistoryCharges.map((charge) => (
+                            <div key={charge.id ?? `${charge.tenant_id}-${charge.billing_month}-${charge.amount}`} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem', padding: '0.85rem 0.9rem', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 'var(--radius-sm)', background: 'rgba(245, 158, 11, 0.06)' }}>
+                              <div>
+                                <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Description</div>
+                                <div style={{ fontWeight: 600 }}>{charge.description}</div>
+                              </div>
+                              <div>
+                                <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Category</div>
+                                <div style={{ fontWeight: 600 }}>{charge.category}</div>
+                              </div>
+                              <div>
+                                <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Month</div>
+                                <div style={{ fontWeight: 600 }}>{format(new Date(charge.billing_month), 'MMM yyyy')}</div>
+                              </div>
+                              <div>
+                                <div style={{ color: 'var(--text-tertiary)', fontSize: '0.74rem' }}>Amount</div>
+                                <div style={{ fontWeight: 700, color: 'var(--warning)' }}>{formatCurrency(Number(charge.amount))}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </Card>
+              ) : null}
+            </div>
           );
         })}
       </div>
