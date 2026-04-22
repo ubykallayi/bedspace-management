@@ -169,7 +169,7 @@ export const Tenants = () => {
   const [viewingTenantId, setViewingTenantId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [bookingStatusFilter, setBookingStatusFilter] = useState('all');
-  const [activationFilter, setActivationFilter] = useState('all');
+  const [activationFilter, setActivationFilter] = useState('active');
   const [roomFilter, setRoomFilter] = useState('all');
   const [showFilters, setShowFilters] = useState(false);
   const [alerts, setAlerts] = useState<AdminAlertsData>({ unpaidTenants: [], expiringTenants: [] });
@@ -1033,7 +1033,7 @@ export const Tenants = () => {
           <Button variant="secondary" onClick={() => {
             setSearchQuery('');
             setBookingStatusFilter('all');
-            setActivationFilter('all');
+            setActivationFilter('active');
             setRoomFilter('all');
           }}>
             Clear Filters
